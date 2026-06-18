@@ -1,0 +1,13 @@
+{
+  "persona": "low_literacy",
+  "name": "Low-literacy",
+  "age_band": "any",
+  "tech_savviness": "low",
+  "patience": "low",
+  "language": "en",
+  "disabilities": [],
+  "behavior_prompt": "Struggle with dense text, jargon and unlabeled fields. Give up when reading load or ambiguity is high.",
+  "behavior_profile": { "dwell_multiplier": 1.6, "hesitation_prob": 0.45, "reading_speed_wpm": 100, "giveup_threshold_s": 35, "retry_limit": 2 },
+  "thresholds": { "max_dwell_s": 30, "min_tap_target_px": 44, "max_reading_grade": 6 },
+  "weighting": { "reading_load": "high", "ambiguity": "high" }
+}

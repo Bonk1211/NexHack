@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node / Next
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# Env / secrets
+.env
+.env.local
+*.local
+
+# Playwright
+playwright-report/
+test-results/
+/backend/.playwright/
+
+# Artifacts
+/artifacts/
+*.pdf
+screenshots/
+replays/
+
+# OS
+.DS_Store

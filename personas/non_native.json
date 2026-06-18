@@ -1,0 +1,13 @@
+{
+  "persona": "non_native",
+  "name": "Non-native speaker (BM/EN/中文/தமிழ்)",
+  "age_band": "any",
+  "tech_savviness": "medium",
+  "patience": "medium",
+  "language": "ms",
+  "disabilities": [],
+  "behavior_prompt": "Hit untranslated keys, truncated strings and broken layout. Fail on localisation breakage that hides the next action.",
+  "behavior_profile": { "dwell_multiplier": 1.4, "hesitation_prob": 0.35, "reading_speed_wpm": 130, "giveup_threshold_s": 40, "retry_limit": 3 },
+  "thresholds": { "max_dwell_s": 32, "min_tap_target_px": 44, "max_reading_grade": 8, "flag_untranslated": true },
+  "weighting": { "localisation": "high" }
+}
