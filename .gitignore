@@ -28,5 +28,8 @@ test-results/
 screenshots/
 replays/
 
+# Local Claude settings (personal, e.g. GateGuard toggle)
+.claude/settings.local.json
+
 # OS
 .DS_Store

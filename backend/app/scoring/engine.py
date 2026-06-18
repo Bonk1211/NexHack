@@ -119,6 +119,15 @@ def _has_friction(step: StepSignals, t: PersonaThresholds) -> bool:
     )
 
 
+def step_status(step: StepSignals, t: PersonaThresholds) -> str:
+    """Per-cell status for the friction matrix (§14, FR-3.3): red/amber/green."""
+    if _step_blocks(step, t):
+        return "red"
+    if _has_friction(step, t):
+        return "amber"
+    return "green"
+
+
 # --- The scorer -------------------------------------------------------------
 
 def score(
