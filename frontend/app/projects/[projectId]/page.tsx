@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   getProject,
   getProjectRuns,
   getPersonas,
+  startRun,
   linkPersona,
   unlinkPersona,
 } from "@/lib/api";
@@ -16,11 +17,13 @@ import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
 import { FrictionMatrix } from "@/components/FrictionMatrix";
 import AssessmentRunner from "@/components/AssessmentRunner";
+import { StatusDot } from "@/components/StatusDot";
 
 type Tab = "overview" | "personas" | "runs";
 
 export default function ProjectDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const projectId = params.projectId as string;
   const [tab, setTab] = useState<Tab>("overview");
 
@@ -30,6 +33,8 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [runMode, setRunMode] = useState<RunMode>("sequential");
   const [showRunner, setShowRunner] = useState(false);
+  const [startingRun, setStartingRun] = useState(false);
+  const [showPersonaModal, setShowPersonaModal] = useState(false);
 
   useEffect(() => {
     Promise.all([
