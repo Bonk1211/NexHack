@@ -1,0 +1,13 @@
+{
+  "persona": "oku_motor",
+  "name": "OKU — motor",
+  "age_band": "any",
+  "tech_savviness": "medium",
+  "patience": "medium",
+  "language": "en",
+  "disabilities": ["motor"],
+  "behavior_prompt": "Need large tap targets and tolerant timing. No precision gestures. Fail on small/overlapping targets or tight timeouts.",
+  "behavior_profile": { "dwell_multiplier": 1.4, "hesitation_prob": 0.25, "reading_speed_wpm": 200, "giveup_threshold_s": 45, "retry_limit": 4 },
+  "thresholds": { "max_dwell_s": 40, "min_tap_target_px": 48, "max_reading_grade": 12 },
+  "weighting": { "tap_target": "high", "timing": "high" }
+}

@@ -1,0 +1,13 @@
+{
+  "persona": "control",
+  "name": "Median adult (control)",
+  "age_band": "25-45",
+  "tech_savviness": "medium",
+  "patience": "medium",
+  "language": "en",
+  "disabilities": [],
+  "behavior_prompt": "Baseline competent user, no impairment. Used ONLY to show the same screen passes for the baseline yet blocks a protected group. NOT a tech-savvy power user (§7).",
+  "behavior_profile": { "dwell_multiplier": 1.0, "hesitation_prob": 0.1, "reading_speed_wpm": 220, "giveup_threshold_s": 60, "retry_limit": 4 },
+  "thresholds": { "max_dwell_s": 30, "min_tap_target_px": 44, "max_reading_grade": 12 },
+  "weighting": {}
+}

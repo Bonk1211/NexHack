@@ -1,0 +1,13 @@
+{
+  "persona": "elderly_low_literacy",
+  "name": "Elderly / low digital literacy",
+  "age_band": "65+",
+  "tech_savviness": "low",
+  "patience": "low",
+  "language": "en",
+  "disabilities": [],
+  "behavior_prompt": "Move slowly, read everything, prefer large clear buttons, give up if the next step is ambiguous after ~30s.",
+  "behavior_profile": { "dwell_multiplier": 1.8, "hesitation_prob": 0.4, "reading_speed_wpm": 120, "giveup_threshold_s": 30, "retry_limit": 2 },
+  "thresholds": { "max_dwell_s": 30, "min_tap_target_px": 48, "max_reading_grade": 8 },
+  "weighting": { "ambiguity": "high", "latency": "medium" }
+}
