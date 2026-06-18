@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<!--
+  CLEAN control screen (§22). Same flow as index.html but WITHOUT the planted
+  flaws: labeled OTP, AA-contrast CTA, adequate tap target, plain copy, proper
+  landmark. The contract test asserts this returns no axe violations and every
+  persona completes — the baseline half of the hero diff (§14).
+-->
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DemoBank — Verify</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+    .cta { background:#0f5132; color:#fff; border:none; padding:12px 20px; border-radius:6px;
+           min-width:48px; min-height:48px; font-size:16px; }
+    label { display:block; margin-bottom:6px; }
+    input { padding:12px; font-size:16px; min-height:48px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Enter your code</h1>
+    <p>We sent a 6-digit code to your phone. Type it below to continue.</p>
+    <form>
+      <label for="otp">One-time code</label>
+      <input type="text" id="otp" inputmode="numeric" autocomplete="one-time-code" />
+      <button class="cta" type="submit">Submit</button>
+    </form>
+  </main>
+</body>
+</html>
