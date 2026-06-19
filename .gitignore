@@ -11,6 +11,7 @@ node_modules/
 .next/
 out/
 npm-debug.log*
+*.tsbuildinfo
 
 # Env / secrets
 .env
@@ -21,6 +22,10 @@ npm-debug.log*
 playwright-report/
 test-results/
 /backend/.playwright/
+
+# LangGraph per-run checkpoint store (§8 run graph)
+checkpoints.sqlite
+*.sqlite
 
 # Artifacts
 /artifacts/

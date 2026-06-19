@@ -12,6 +12,11 @@ dependencies = [
     "axe-playwright-python>=0.1.4",  # trusted WCAG signals (§10) — axe-core bridge
     "supabase>=2.5",                 # Postgres + Storage (§15)
     "httpx>=0.27",
+    "reportlab>=4.0",                # audit-style PDF evidence pack (§13)
+    "langgraph>=0.2",                # agent graphs: persona subgraph + run map-reduce (§8, §15)
+    "langgraph-checkpoint-sqlite>=2.0",  # per-persona crash-resume (§8 run graph)
+    "langchain-deepseek>=0.1",       # DeepSeek V4 LLM nodes — comprehend + synthesize (§15, §25 LOCKED)
+    "langchain-core>=0.3",           # message/structured-output primitives
 ]
 
 [dependency-groups]
