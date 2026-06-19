@@ -7,20 +7,36 @@ persistence (app.repository) is invoked best-effort and never blocks the respons
 """
 from __future__ import annotations
 
+import json
+import os
+import pathlib
+import queue
 import re
+import threading
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app import orchestrator, repository
+from app.agents.llm import synthesize
+from app.agents.persona_graph import stream_persona
+from app.agents.run_graph import DEFAULT_FLOW, _requires_labels
+from app.config import settings
 from app.evidence.export import pack_to_json_bytes, pack_to_pdf_bytes
+from app.evidence.pack import PersonaRunResult, build_pack, build_replay
+from app.scoring.engine import score
+from app.scoring.personas import load_library, load_persona, thresholds_for
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
 # In-memory store {run_id: pack}. Survives only for the process lifetime.
 _STORE: dict[str, dict] = {}
+
+# Local screenshot store, served as static files at /artifacts (see app.main).
+_ARTIFACTS = pathlib.Path(settings.artifacts_dir).resolve()
 
 
 class StartRunRequest(BaseModel):
@@ -30,6 +46,34 @@ class StartRunRequest(BaseModel):
     seed: int = 1337           # §16 deterministic runs
     mode: str = "sequential"   # §20: sequential for clean demo narration
     run_id: str | None = None  # reuse to resume an interrupted run (§8 checkpoint)
+
+
+def _to_served_url(ref: str | None) -> str | None:
+    """Map a LOCAL artifact path to its /artifacts served URL; pass URLs through.
+
+    After a run, screenshot refs are either Storage URLs (Supabase configured) or
+    local paths under the artifacts dir (dev). Storage URLs (http…) are returned
+    as-is; local paths become `/artifacts/<run_id>/<persona>/step_N.png` so the
+    frontend can render the empathy-replay frames (FR-1.3).
+    """
+    if not ref or ref.startswith(("http://", "https://", "/artifacts/")):
+        return ref
+    try:
+        rel = os.path.relpath(pathlib.Path(ref).resolve(), _ARTIFACTS)
+    except ValueError:
+        return ref
+    if rel.startswith(".."):
+        return ref  # outside the served root — leave untouched
+    return "/artifacts/" + rel.replace(os.sep, "/")
+
+
+def _serve_screenshots(pack: dict) -> None:
+    """Rewrite every screenshot ref in the pack to a browser-loadable URL (in place)."""
+    for persona, shots in pack.get("screenshots", {}).items():
+        pack["screenshots"][persona] = [_to_served_url(s) for s in shots]
+    for clip in pack.get("replay", {}).values():
+        for frame in clip.get("frames", []):
+            frame["screenshot_url"] = _to_served_url(frame.get("screenshot_url"))
 
 
 @router.post("")
@@ -44,16 +88,203 @@ def start_run(req: StartRunRequest) -> dict:
         persona_names=req.persona_names,
         seed=req.seed,
         run_id=run_id,
+        artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
     )
-    _STORE[run_id] = pack
 
-    # Best-effort persistence — swallow DB errors so the demo path never breaks.
+    # Best-effort persistence — swallow DB errors so the demo path never breaks. When
+    # Supabase is configured this uploads screenshots and rewrites refs to Storage URLs.
     try:
         repository.persist_run(pack)
     except Exception:
         pass
 
+    # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
+    _serve_screenshots(pack)
+    _STORE[run_id] = pack
     return {"run_id": run_id, "pack": pack}
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event)}\n\n"
+
+
+def _step_status(step) -> str:
+    if step.dead_end:
+        return "red"
+    return "green" if step.completed else "amber"
+
+
+@router.get("/stream")
+def stream_run(
+    app_name: str,
+    target_url: str,
+    persona_names: str,
+    seed: int = 1337,
+    run_id: str | None = None,
+) -> StreamingResponse:
+    """SSE: run the assessment and stream every graph node as it executes (§8/§20).
+
+    `persona_names` is comma-separated (EventSource is GET-only). Personas run
+    SEQUENTIALLY (§20 narration); each persona subgraph node (observe→comprehend→
+    decide→act) is emitted the moment it completes, carrying the screenshot the agent
+    just captured — so the client watches the agent test the target app step by step.
+    """
+    names = [n for n in persona_names.split(",") if n]
+    rid = run_id or str(uuid.uuid4())
+    root = _ARTIFACTS / rid
+
+    # The graph runs on a worker thread and pushes events onto this queue; the SSE
+    # generator drains it. This lets CDP screencast frames stream CONTINUOUSLY (the
+    # live external-app browser) while the graph is mid-node, instead of only at node
+    # boundaries. `frame` events are dropped under backpressure so video never lags.
+    q: queue.Queue = queue.Queue(maxsize=48)
+    SENTINEL = object()
+
+    def worker():
+        try:
+            q.put({"type": "node", "scope": "run", "node": "init", "personas": names})
+            results: list[PersonaRunResult] = []
+            shots_map: dict[str, list] = {}
+
+            for i, name in enumerate(names):
+                cfg = {**load_persona(name), "stem": name}
+                thresholds = thresholds_for(cfg)
+                payload = {
+                    "persona": name,
+                    "persona_idx": i,
+                    "behavior_profile": cfg.get("behavior_profile", {}),
+                    "requires_labels": _requires_labels(cfg),
+                    "thresholds": thresholds,
+                    "target_url": target_url,
+                    "flow": DEFAULT_FLOW,
+                    "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
+                    "seed": seed + i,                 # §16 deterministic per persona
+                    "artifact_dir": str(root / name),  # FR-1.3 screenshot every step
+                }
+                q.put({"type": "persona_start", "persona": name, "idx": i,
+                       "label": cfg.get("name", name)})
+
+                def on_frame(b64, _name=name):
+                    try:
+                        q.put_nowait({"type": "frame", "persona": _name, "data": b64})
+                    except queue.Full:
+                        pass  # drop the frame — keep the live view current, not buffered
+
+                steps, shots = [], []
+                for node, data in stream_persona(payload, on_frame=on_frame):
+                    if node == "observe":
+                        q.put({"type": "node", "scope": "persona", "persona": name,
+                               "node": "observe", "step_idx": len(steps),
+                               "output": {"captured": f"step {len(steps)} screen + a11y tree"},
+                               "screenshot_url": _to_served_url(data.get("current_shot"))})
+                    elif node == "comprehend":
+                        q.put({"type": "node", "scope": "persona", "persona": name,
+                               "node": "comprehend", "confusion": data.get("last_confusion"),
+                               "output": {"confusion": data.get("last_confusion"),
+                                          "reason": data.get("last_reason"),
+                                          "fallback_target": data.get("last_fallback")}})
+                    elif node == "decide":
+                        q.put({"type": "node", "scope": "persona", "persona": name,
+                               "node": "decide", "dwell_s": data.get("current_dwell"),
+                               "output": {"dwell_s": data.get("current_dwell"),
+                                          "label_block": data.get("current_label_block"),
+                                          "give_up": data.get("current_give_up")}})
+                    elif node == "act":
+                        step = data["steps"][0]
+                        shot = data["shots"][0]
+                        steps.append(step)
+                        shots.append(shot)
+                        q.put({"type": "step", "scope": "persona", "persona": name,
+                               "node": "act", "step_idx": step.step_idx,
+                               "step_key": step.step_key, "status": _step_status(step),
+                               "confusion": step.llm_confusion, "dwell_s": step.dwell_s,
+                               "output": {"step": step.step_key, "status": _step_status(step),
+                                          "dead_end": step.dead_end, "completed": step.completed},
+                               "screenshot_url": _to_served_url(shot)})
+
+                res = PersonaRunResult(name, tuple(steps), thresholds, score(steps, thresholds))
+                results.append(res)
+                shots_map[name] = shots
+                v = res.result.persona_verdict
+                q.put({"type": "persona_done", "persona": name, "verdict": v.verdict,
+                       "severity": v.severity, "blocked_at": v.blocked_at})
+
+            # Reduce → score → evidence (the run-graph tail, narrated as nodes w/ output).
+            q.put({"type": "node", "scope": "run", "node": "aggregate",
+                   "output": {"ordered_personas": [r.persona for r in results]}})
+            q.put({"type": "node", "scope": "run", "node": "score",
+                   "output": {"scores": [
+                       {"persona": r.persona,
+                        "inclusion_score": r.result.composite.inclusion_score,
+                        "verdict": r.result.persona_verdict.verdict,
+                        "severity": r.result.persona_verdict.severity}
+                       for r in results]}})
+            pack = build_pack(app_name, datetime.now(timezone.utc).isoformat(), results)
+            pack["screenshots"] = {r.persona: shots_map.get(r.persona, []) for r in results}
+            disab = {r.persona: load_persona(r.persona).get("disabilities", []) for r in results}
+            rows = pack["matrix"]["rows"]
+            pack["replay"] = {
+                p["persona"]: build_replay(
+                    disab.get(p["persona"], []), p["steps"],
+                    pack["screenshots"].get(p["persona"], []), rows.get(p["persona"], {}),
+                )
+                for p in pack["personas"]
+            }
+            pack["synthesis"] = synthesize(pack).model_dump()
+            wcag_fails = [c for c, vd in pack.get("wcag_conformance", {}).items() if vd == "fail"]
+            blocked = [p["persona"] for p in pack["personas"] if p["verdict"] == "blocked"]
+            q.put({"type": "node", "scope": "run", "node": "evidence",
+                   "output": {"inclusion_score": pack["inclusion_score"],
+                              "wcag_failures": wcag_fails,
+                              "remediations": len(pack.get("remediation", [])),
+                              "blocked_personas": blocked,
+                              "rollup": pack["synthesis"].get("rollup")}})
+
+            try:
+                repository.persist_run(pack)
+            except Exception:
+                pass
+            _serve_screenshots(pack)
+            _STORE[rid] = pack
+            q.put({"type": "node", "scope": "run", "node": "alerts",
+                   "output": {"p0_alerts": len([p for p in pack["personas"]
+                                                if p.get("severity") == "P0"])}})
+            q.put({"type": "final", "run_id": rid, "pack": pack})
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the client
+            q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            q.put(SENTINEL)
+
+    def gen():
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = q.get()
+            if item is SENTINEL:
+                break
+            yield _sse(item)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+personas_router = APIRouter(prefix="/personas", tags=["personas"])
+
+
+@personas_router.get("")
+def list_personas() -> list[dict]:
+    """The persona library (FR-1.4): pick ≥3 to run over the same flow."""
+    return [
+        {
+            "stem": stem,
+            "name": cfg.get("name", stem),
+            "disabilities": cfg.get("disabilities", []),
+            "language": cfg.get("language"),
+        }
+        for stem, cfg in load_library().items()
+    ]
 
 
 @router.get("")
