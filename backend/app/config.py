@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_key: str = ""
+    storage_bucket: str = "evidence"   # Supabase Storage bucket for screenshots + packs
 
     # Model family LOCKED to DeepSeek V4 (§25 resolved). Two-tier: cheap per-step
     # vision (flash), larger once-per-run synthesis (pro). The client is DeepSeek-only

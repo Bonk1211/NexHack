@@ -4,7 +4,7 @@ trusted per-step stream (wcag_conformance/axe_violations), the indicative stream
 Also asserts the no-creds path is a clean no-op."""
 from __future__ import annotations
 
-from app import db, repository
+from app import db, repository, storage
 from app.evidence.pack import PersonaRunResult, build_pack
 from app.scoring.engine import PersonaThresholds, StepSignals, WcagSignal, score
 
@@ -61,6 +61,45 @@ def test_persist_writes_trusted_and_indicative_per_step(monkeypatch):
     assert otp["backtracked"] is False
     assert otp["dwell_ms"] == 12000
     assert otp["screenshot_url"] == "/tmp/otp.png"
+
+
+def test_persist_uploads_artifacts_and_persists_urls(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    sink: dict[str, list] = {}
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClient(sink))
+
+    # Storage uploads succeed → URLs replace local paths; pack URLs are persisted.
+    monkeypatch.setattr(
+        storage, "upload_file", lambda c, local, dest: f"https://cdn/{dest}"
+    )
+    monkeypatch.setattr(
+        storage, "upload_pack", lambda c, pack, rid: (f"https://cdn/{rid}/p.pdf", f"https://cdn/{rid}/p.json")
+    )
+
+    run_id = repository.persist_run(_pack_with_steps())
+
+    otp = next(e for e in sink["screen_events"] if e["step_idx"] == 1)
+    assert otp["screenshot_url"] == f"https://cdn/{run_id}/oku_visual/step_1.png"
+    ep = sink["evidence_packs"][0]
+    assert ep["pdf_url"] == f"https://cdn/{run_id}/p.pdf"
+    assert ep["json_url"] == f"https://cdn/{run_id}/p.json"
+
+
+def test_persist_falls_back_to_local_path_when_upload_fails(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    sink: dict[str, list] = {}
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClient(sink))
+    monkeypatch.setattr(storage, "upload_file", lambda c, local, dest: None)
+    monkeypatch.setattr(storage, "upload_pack", lambda c, pack, rid: (None, None))
+
+    repository.persist_run(_pack_with_steps())
+
+    otp = next(e for e in sink["screen_events"] if e["step_idx"] == 1)
+    assert otp["screenshot_url"] == "/tmp/otp.png"   # local ref preserved
+    ep = sink["evidence_packs"][0]
+    assert ep["pdf_url"] is None and ep["json_url"] is None
 
 
 def test_persist_is_noop_without_creds(monkeypatch):
