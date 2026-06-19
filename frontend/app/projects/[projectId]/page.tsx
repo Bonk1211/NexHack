@@ -17,6 +17,7 @@ import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
 import { FrictionMatrix } from "@/components/FrictionMatrix";
 import AssessmentRunner from "@/components/AssessmentRunner";
+import { RunLog } from "@/components/RunLog";
 import { StatusDot } from "@/components/StatusDot";
 
 type Tab = "overview" | "personas" | "runs";
@@ -76,7 +77,7 @@ export default function ProjectDetailPage() {
   const linkedPersonas = allPersonas.filter((p) => linkedPersonaIds.includes(p.id));
   const personaNames: Record<string, string> = {};
   allPersonas.forEach((p) => {
-    personaNames[p.id] = p.name;
+    personaNames[p.id] = p.identity.name;
   });
 
   return (
@@ -192,7 +193,7 @@ function OverviewTab({
   }
 
   const blockedPersonas = run.personaResults.filter((p) => p.status === "blocked");
-  const atRiskNames = blockedPersonas.map((p) => p.persona.name).join(", ");
+  const atRiskNames = blockedPersonas.map((p) => p.persona.identity.name).join(", ");
 
   return (
     <div>
@@ -222,6 +223,8 @@ function OverviewTab({
       <PersonaWall results={run.personaResults} />
 
       <FrictionMatrix matrix={run.frictionMatrix} personaNames={personaNames} />
+
+      <RunLog results={run.personaResults} />
     </div>
   );
 }
@@ -266,12 +269,12 @@ function PersonasTab({
                 <div className="flex items-center gap-3">
                   <div className="h-10 w-10 overflow-hidden rounded-full bg-field">
                     {p.figurineUrl && (
-                      <img src={p.figurineUrl} alt={p.name} className="h-10 w-10 rounded-full" />
+                      <img src={p.figurineUrl} alt={p.identity.name} className="h-10 w-10 rounded-full" />
                     )}
                   </div>
                   <div>
-                    <div className="font-display text-[15px] text-primary">{p.name}</div>
-                    <div className="text-[12px] text-tertiary">{p.label}</div>
+                    <div className="font-display text-[15px] text-primary">{p.identity.name}</div>
+                    <div className="text-[12px] text-tertiary">{p.identity.label}</div>
                   </div>
                 </div>
                 <button
@@ -360,12 +363,12 @@ function AddPersonaModal({
               >
                 <div className="h-8 w-8 overflow-hidden rounded-full bg-field">
                   {p.figurineUrl && (
-                    <img src={p.figurineUrl} alt={p.name} className="h-8 w-8 rounded-full" />
+                    <img src={p.figurineUrl} alt={p.identity.name} className="h-8 w-8 rounded-full" />
                   )}
                 </div>
                 <div className="flex-1">
-                  <div className="text-[14px] font-medium text-primary">{p.name}</div>
-                  <div className="text-[12px] text-tertiary">{p.label}</div>
+                  <div className="text-[14px] font-medium text-primary">{p.identity.name}</div>
+                  <div className="text-[12px] text-tertiary">{p.identity.label}</div>
                 </div>
                 {selected.includes(p.id) && (
                   <span className="text-brand text-[14px]">✓</span>

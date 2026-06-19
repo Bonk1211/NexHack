@@ -31,8 +31,8 @@ export function PersonaCard({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate font-display text-[17px] text-primary">{result.persona.name}</div>
-          <div className="mt-0.5 truncate text-[13px] text-tertiary">{result.persona.label}</div>
+          <div className="truncate font-display text-[17px] text-primary">{result.persona.identity.name}</div>
+          <div className="mt-0.5 truncate text-[13px] text-tertiary">{result.persona.identity.label}</div>
         </div>
         <StatusDot status={status} size={7} />
       </div>

@@ -11,6 +11,7 @@ import {
   pollFigurine,
 } from "@/lib/api";
 import type { Persona, FigurineStatus } from "@/lib/types";
+import { resolveValue } from "@/lib/types";
 import { behaviorSentence } from "@/lib/format";
 
 const AGE_BANDS = ["18–24", "25–34", "35–44", "45–54", "55–64", "65+"];
@@ -41,10 +42,10 @@ export default function PersonaDetailPage() {
   const [language, setLanguage] = useState("English");
   const [disabilities, setDisabilities] = useState<string[]>([]);
   const [techSavviness, setTechSavviness] = useState(0.5);
-  const [patience, setPatience] = useState(0.5);
+
   const [dwellMultiplier, setDwellMultiplier] = useState(1);
-  const [hesitationProb, setHesitationProb] = useState(0.3);
   const [giveupThresholdS, setGiveupThresholdS] = useState(60);
+  const [misinterpretProb, setMisinterpretProb] = useState(0.2);
 
   const [figurineStatus, setFigurineStatus] = useState<FigurineStatus>("none");
   const [figurineUrl, setFigurineUrl] = useState<string | undefined>();
@@ -56,16 +57,15 @@ export default function PersonaDetailPage() {
     }
     getPersona(personaId).then((p) => {
       setPersona(p);
-      setName(p.name);
-      setLabel(p.label);
-      setAgeBand(p.ageBand);
-      setLanguage(p.language);
-      setDisabilities(p.disabilities);
-      setTechSavviness(p.techSavviness);
-      setPatience(p.patience);
-      setDwellMultiplier(p.behaviorProfile.dwellMultiplier);
-      setHesitationProb(p.behaviorProfile.hesitationProb);
-      setGiveupThresholdS(p.behaviorProfile.giveupThresholdS);
+      setName(p.identity.name);
+      setLabel(p.identity.label);
+      setAgeBand(p.identity.ageBand);
+      setLanguage(p.identity.language);
+      setDisabilities(p.identity.disabilities);
+      setTechSavviness(p.identity.techSavviness);
+      setDwellMultiplier(resolveValue(p.behavior.dwellMultiplier));
+      setGiveupThresholdS(resolveValue(p.behavior.giveupThresholdS));
+      setMisinterpretProb(resolveValue(p.behavior.misinterpretProb));
       setFigurineStatus(p.figurineStatus);
       setFigurineUrl(p.figurineUrl);
       setLoading(false);
@@ -98,24 +98,23 @@ export default function PersonaDetailPage() {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
-    const data = {
-      name: name.trim(),
-      label: label.trim(),
-      ageBand,
-      language,
-      disabilities,
-      techSavviness,
-      patience,
-      behaviorProfile: {
+    const data: Partial<Persona> & { identity: Persona["identity"] } = {
+      identity: {
+        name: name.trim(),
+        label: label.trim(),
+        ageBand,
+        language,
+        disabilities,
+        techSavviness,
+      },
+      behavior: {
         dwellMultiplier,
-        hesitationProb,
-        readingSpeedWpm: 200,
         giveupThresholdS,
-        retryLimit: 3,
+        misinterpretProb,
       },
     };
     if (isNew) {
-      const created = await createPersona(data);
+      const created = await createPersona(data as Parameters<typeof createPersona>[0]);
       router.push(`/personas/${created.id}`);
     } else {
       const updated = await updatePersona(personaId, data);
@@ -133,8 +132,7 @@ export default function PersonaDetailPage() {
   const previewSentence = behaviorSentence({
     name: name || "This persona",
     techSavviness,
-    patience,
-    behaviorProfile: { dwellMultiplier, hesitationProb, giveupThresholdS },
+    behavior: { dwellMultiplier, giveupThresholdS, misinterpretProb },
   });
 
   if (loading) {
@@ -161,112 +159,115 @@ export default function PersonaDetailPage() {
 
       <form onSubmit={handleSave}>
         <div className="grid grid-cols-2 gap-8">
-          <div className="space-y-5">
+          <div className="space-y-6">
             <h1 className="font-display text-[28px] text-primary">
               {isNew ? "New persona" : name}
             </h1>
 
-            <Field label="Name">
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="input"
-                required
-              />
-            </Field>
-            <Field label="Label">
-              <input
-                type="text"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                className="input"
-                placeholder="OKU — visual (low-vision)"
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="Age band">
-                <select
-                  value={ageBand}
-                  onChange={(e) => setAgeBand(e.target.value)}
-                  className="input"
-                >
-                  {AGE_BANDS.map((b) => (
-                    <option key={b} value={b}>{b}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Language">
-                <input
-                  type="text"
-                  value={language}
-                  onChange={(e) => setLanguage(e.target.value)}
-                  className="input"
+            <div>
+              <div className="section-label mb-4">Identity</div>
+              <div className="space-y-4">
+                <Field label="Name">
+                  <input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    className="input"
+                    required
+                  />
+                </Field>
+                <Field label="Label">
+                  <input
+                    type="text"
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    className="input"
+                    placeholder="OKU — visual (low-vision)"
+                  />
+                </Field>
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="Age band">
+                    <select
+                      value={ageBand}
+                      onChange={(e) => setAgeBand(e.target.value)}
+                      className="input"
+                    >
+                      {AGE_BANDS.map((b) => (
+                        <option key={b} value={b}>{b}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Language">
+                    <input
+                      type="text"
+                      value={language}
+                      onChange={(e) => setLanguage(e.target.value)}
+                      className="input"
+                    />
+                  </Field>
+                </div>
+
+                <Field label="Disabilities">
+                  <div className="flex flex-wrap gap-2">
+                    {DISABILITY_OPTIONS.map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => toggleDisability(d)}
+                        className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+                          disabilities.includes(d)
+                            ? "bg-brand text-white"
+                            : "bg-field text-secondary hover:bg-hairline"
+                        }`}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+
+                <SliderField
+                  label="Tech savviness"
+                  value={techSavviness}
+                  onChange={setTechSavviness}
+                  min={0}
+                  max={1}
+                  step={0.05}
                 />
-              </Field>
+              </div>
             </div>
 
-            <Field label="Disabilities">
-              <div className="flex flex-wrap gap-2">
-                {DISABILITY_OPTIONS.map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => toggleDisability(d)}
-                    className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
-                      disabilities.includes(d)
-                        ? "bg-brand text-white"
-                        : "bg-field text-secondary hover:bg-hairline"
-                    }`}
-                  >
-                    {d}
-                  </button>
-                ))}
-              </div>
-            </Field>
-
-            <div className="border-t border-hairline pt-5">
+            <div className="border-t border-hairline pt-6">
               <div className="section-label mb-4">Behavior profile</div>
-              <SliderField
-                label="Tech savviness"
-                value={techSavviness}
-                onChange={setTechSavviness}
-                min={0}
-                max={1}
-                step={0.05}
-              />
-              <SliderField
-                label="Patience"
-                value={patience}
-                onChange={setPatience}
-                min={0}
-                max={1}
-                step={0.05}
-              />
-              <SliderField
-                label="Dwell multiplier"
-                value={dwellMultiplier}
-                onChange={setDwellMultiplier}
-                min={0.5}
-                max={3}
-                step={0.1}
-              />
-              <SliderField
-                label="Hesitation probability"
-                value={hesitationProb}
-                onChange={setHesitationProb}
-                min={0}
-                max={1}
-                step={0.05}
-              />
-              <SliderField
-                label="Give-up threshold (s)"
-                value={giveupThresholdS}
-                onChange={setGiveupThresholdS}
-                min={10}
-                max={120}
-                step={5}
-              />
+              <div className="space-y-1">
+                <SliderField
+                  label="Dwell multiplier"
+                  helper="Scales reading/processing time per screen"
+                  value={dwellMultiplier}
+                  onChange={setDwellMultiplier}
+                  min={0.5}
+                  max={3}
+                  step={0.1}
+                />
+                <SliderField
+                  label="Give-up threshold (s)"
+                  helper="Seconds stuck before abandoning the flow"
+                  value={giveupThresholdS}
+                  onChange={setGiveupThresholdS}
+                  min={10}
+                  max={120}
+                  step={5}
+                />
+                <SliderField
+                  label="Misinterpretation likelihood"
+                  helper="Chance this persona misreads an ambiguous label and takes a wrong step"
+                  value={misinterpretProb}
+                  onChange={setMisinterpretProb}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                />
+              </div>
             </div>
 
             <div className="rounded-xl bg-field p-4 text-[13px] text-secondary italic">
@@ -350,6 +351,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function SliderField({
   label,
+  helper,
   value,
   onChange,
   min,
@@ -357,6 +359,7 @@ function SliderField({
   step,
 }: {
   label: string;
+  helper?: string;
   value: number;
   onChange: (v: number) => void;
   min: number;
@@ -371,6 +374,9 @@ function SliderField({
           {value.toFixed(step < 1 ? 2 : 0)}
         </span>
       </div>
+      {helper && (
+        <p className="mb-1.5 text-[11px] text-tertiary">{helper}</p>
+      )}
       <input
         type="range"
         min={min}

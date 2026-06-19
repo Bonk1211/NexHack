@@ -119,23 +119,22 @@ export async function getPersonas(): Promise<Persona[]> {
   return db.personas.map((p) => ({ ...p }));
 }
 
-export async function createPersona(input: Partial<Persona> & { name: string }): Promise<Persona> {
+export async function createPersona(input: Partial<Persona> & { identity: Partial<Persona["identity"]> & { name: string } }): Promise<Persona> {
   await delay();
   const p: Persona = {
     id: uid("p"),
-    name: input.name,
-    label: input.label ?? "",
-    ageBand: input.ageBand ?? "25–34",
-    techSavviness: input.techSavviness ?? 0.5,
-    patience: input.patience ?? 0.5,
-    language: input.language ?? "English",
-    disabilities: input.disabilities ?? [],
-    behaviorProfile: input.behaviorProfile ?? {
+    identity: {
+      name: input.identity.name,
+      label: input.identity.label ?? "",
+      ageBand: input.identity.ageBand ?? "25–34",
+      language: input.identity.language ?? "English",
+      techSavviness: input.identity.techSavviness ?? 0.5,
+      disabilities: input.identity.disabilities ?? [],
+    },
+    behavior: input.behavior ?? {
       dwellMultiplier: 1,
-      hesitationProb: 0.3,
-      readingSpeedWpm: 200,
       giveupThresholdS: 60,
-      retryLimit: 3,
+      misinterpretProb: 0.2,
     },
     figurineStatus: "none",
   };
@@ -178,7 +177,7 @@ export async function pollFigurine(
   if (!p) return { status: "failed" };
   if (p.figurineStatus === "generating") {
     const { generateFigurine: gen } = await import("./format");
-    p.figurineUrl = gen(p.id, p.name);
+    p.figurineUrl = gen(p.id, p.identity.name);
     p.figurineStatus = "ready";
   }
   return { status: p.figurineStatus, url: p.figurineUrl };
