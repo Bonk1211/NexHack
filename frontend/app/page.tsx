@@ -1,175 +1,239 @@
-// InclusionScope dashboard (§14 demo surface). Composes the persona wall,
-// the friction matrix (hero), empathy replay (centerpiece), the trusted WCAG
-// stream and the indicative persona stream side by side (§16), and remediation.
-//
-// Loads a live run via ?run=<id> when present; otherwise renders SAMPLE_PACK so
-// the surface always renders for the demo, with or without a backend.
-import { getRun, SAMPLE_PACK, type PackResult } from "@/lib/api";
-import PersonaPanel from "@/components/PersonaPanel";
-import FrictionMatrix from "@/components/FrictionMatrix";
-import EmpathyReplay from "@/components/EmpathyReplay";
-import WcagFindings from "@/components/WcagFindings";
-import Remediation from "@/components/Remediation";
-import { personaLabel } from "@/lib/format";
+"use client";
 
-async function loadPack(runId?: string): Promise<{ pack: PackResult; live: boolean }> {
-  if (runId) {
-    try {
-      return { pack: await getRun(runId), live: true };
-    } catch {
-      // fall through to the sample pack so the demo never shows a blank screen
-    }
-  }
-  return { pack: SAMPLE_PACK, live: false };
-}
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { getProjects, createProject, createRepo } from "@/lib/api";
+import type { Project, Viewport } from "@/lib/types";
+import { relativeTime, scorePct } from "@/lib/format";
+import { ScoreRing } from "@/components/ScoreRing";
 
-// One-line "who are we excluding" rollup (§14) derived from the pack.
-function excludingLine(pack: PackResult): string | null {
-  const blocked = pack.personas.filter((p) => p.verdict === "blocked");
-  if (blocked.length === 0) return null;
-  const where = blocked.find((p) => p.blocked_at)?.blocked_at;
-  const names = blocked.map((p) => personaLabel(p.persona)).join(", ");
-  return `This app silently blocks ${names}${where ? ` at ${where}` : ""}.`;
-}
+export default function Home() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showNew, setShowNew] = useState(false);
 
-export default async function Home({
-  searchParams,
-}: {
-  searchParams: Promise<{ run?: string }>;
-}) {
-  const { run } = await searchParams;
-  const { pack, live } = await loadPack(run);
-  const scorePct = Math.round(pack.inclusion_score * 100);
-  const rollup = excludingLine(pack);
+  useEffect(() => {
+    getProjects().then((p) => {
+      setProjects(p);
+      setLoading(false);
+    });
+  }, []);
 
   return (
-    <main style={{ padding: "32px 28px", maxWidth: 1180, margin: "0 auto" }}>
-      {/* Header: app name + inclusion score */}
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-          gap: 16,
-          marginBottom: 8,
-        }}
-      >
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <h1 style={{ margin: 0, fontSize: 26, letterSpacing: -0.5 }}>InclusionScope</h1>
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 700,
-                padding: "2px 8px",
-                borderRadius: 999,
-                background: live ? "#052e2b" : "#1e2434",
-                color: live ? "#5eead4" : "#94a3b8",
-                border: `1px solid ${live ? "#134e4a" : "#2a3142"}`,
-              }}
-            >
-              {live ? "LIVE RUN" : "SAMPLE"}
-            </span>
+    <div>
+      <div className="bg-anchor px-10 pt-16 pb-14">
+        <div className="rise">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-on-dark-dim">
+            InclusionScope
           </div>
-          <p style={{ margin: "6px 0 0", color: "var(--muted)", fontSize: 14 }}>
-            {pack.app} · run {new Date(pack.run_at).toUTCString()}
+          <h1 className="mt-3 font-display text-[40px] leading-tight text-on-dark">
+            Audit every user. Before they leave.
+          </h1>
+          <p className="mt-2 max-w-lg text-[15px] text-on-dark-dim">
+            Persona-driven accessibility audits that show who gets blocked — and exactly why.
           </p>
-        </div>
-
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--faint)" }}>
-            Composite inclusion score
-          </div>
-          <div
-            style={{
-              fontSize: 40,
-              fontWeight: 800,
-              lineHeight: 1,
-              color: scorePct >= 80 ? "#22c55e" : scorePct >= 50 ? "#f59e0b" : "#ef4444",
-            }}
+          <button
+            type="button"
+            onClick={() => setShowNew(true)}
+            className="mt-6 rounded-xl bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
           >
-            {scorePct}
-            <span style={{ fontSize: 18, color: "var(--faint)", fontWeight: 600 }}> / 100</span>
-          </div>
-          <div style={{ fontSize: 11, color: "var(--faint)", marginTop: 2 }}>
-            derived · weights w1·behavioral + w2·wcag + w3·llm
-          </div>
+            New project
+          </button>
         </div>
-      </header>
+      </div>
 
-      {/* "Who are we excluding" rollup — the business line (§14) */}
-      {rollup && (
-        <div
-          style={{
-            background: "#1a0f12",
-            border: "1px solid #5b2330",
-            borderLeft: "3px solid #ef4444",
-            borderRadius: 12,
-            padding: "14px 18px",
-            margin: "18px 0 28px",
-            fontSize: 16,
-            fontWeight: 600,
-            color: "#fecaca",
+      <div className="px-10 py-10">
+        {loading ? (
+          <div className="grid grid-cols-3 gap-5">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="card h-[140px] shimmer" />
+            ))}
+          </div>
+        ) : projects.length === 0 ? (
+          <EmptyState onNew={() => setShowNew(true)} />
+        ) : (
+          <div className="grid grid-cols-3 gap-5">
+            {projects.map((p, i) => (
+              <div key={p.id} className="rise" style={{ animationDelay: `${i * 30}ms` }}>
+                <ProjectCard project={p} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {showNew && (
+        <NewProjectSlideOver
+          onClose={() => setShowNew(false)}
+          onCreated={(p) => {
+            setProjects((prev) => [...prev, p]);
+            setShowNew(false);
           }}
-        >
-          {rollup}
-        </div>
+        />
       )}
+    </div>
+  );
+}
 
-      {/* HERO — the friction matrix diff (§14, FR-3.3) */}
-      <section className="is-card" style={{ marginBottom: 24 }}>
-        <p className="is-eyebrow">The diff is the hero</p>
-        <h2 className="is-h2">Friction matrix — persona × step</h2>
-        <FrictionMatrix matrix={pack.matrix} />
-      </section>
+function ProjectCard({ project }: { project: Project }) {
+  return (
+    <Link
+      href={`/projects/${project.id}`}
+      className="card group block p-6 no-underline transition-all duration-200 ease-out hover:-translate-y-0.5"
+    >
+      <div className="flex items-start justify-between">
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate font-display text-[20px] text-primary">{project.name}</h3>
+          <p className="mt-1 text-[13px] text-secondary">
+            {project.personaCount} persona{project.personaCount !== 1 ? "s" : ""}
+          </p>
+        </div>
+        {project.latestScore != null && (
+          <ScoreRing value={project.latestScore} size={56} />
+        )}
+      </div>
+      <div className="mt-4 text-[12px] text-tertiary">
+        {relativeTime(project.lastRunAt)}
+      </div>
+    </Link>
+  );
+}
 
-      {/* CENTERPIECE — empathy replay */}
-      <section className="is-card" style={{ marginBottom: 24 }}>
-        <p className="is-eyebrow">Centerpiece</p>
-        <h2 className="is-h2">Empathy replay — see the screen through the persona&apos;s eyes</h2>
-        <EmpathyReplay />
-      </section>
+function EmptyState({ onNew }: { onNew: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-24">
+      <div className="card p-10 text-center">
+        <div className="font-display text-[24px] text-primary">No projects yet</div>
+        <p className="mt-2 text-[14px] text-secondary">
+          Create your first project to start auditing your onboarding flows.
+        </p>
+        <button
+          type="button"
+          onClick={onNew}
+          className="mt-5 rounded-xl bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
+        >
+          Create project
+        </button>
+      </div>
+    </div>
+  );
+}
 
-      {/* TRUSTED vs INDICATIVE split (§16) */}
-      <section
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(280px, 1fr) minmax(280px, 1.4fr)",
-          gap: 20,
-          marginBottom: 24,
-          alignItems: "start",
-        }}
+function NewProjectSlideOver({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (p: Project) => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [repoName, setRepoName] = useState("");
+  const [stagingUrl, setStagingUrl] = useState("");
+  const [viewport, setViewport] = useState<Viewport>("desktop");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    const p = await createProject({ name: name.trim(), description: description.trim() || undefined });
+    if (repoName.trim() && stagingUrl.trim()) {
+      await createRepo(p.id, { name: repoName.trim(), stagingUrl: stagingUrl.trim(), viewport });
+    }
+    onCreated(p);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="h-full w-[420px] overflow-y-auto bg-card p-8 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="is-card">
-          <span className="is-tag is-tag--trusted">Trusted — WCAG conformance</span>
-          <h2 className="is-h2" style={{ marginTop: 12 }}>
-            Machine-verifiable findings
-          </h2>
-          <p style={{ fontSize: 12, color: "var(--muted)", margin: "-8px 0 12px" }}>
-            Straight from axe-core + a11y signals. Reliable without trusting the simulation.
-          </p>
-          <WcagFindings conformance={pack.wcag_conformance} />
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-[24px] text-primary">New project</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[14px] text-secondary hover:text-primary"
+          >
+            Close
+          </button>
         </div>
 
-        <div className="is-card">
-          <span className="is-tag is-tag--indicative">Indicative — persona simulation</span>
-          <h2 className="is-h2" style={{ marginTop: 12 }}>
-            Persona wall
-          </h2>
-          <p style={{ fontSize: 12, color: "var(--muted)", margin: "-8px 0 12px" }}>
-            Behavioral / completion verdicts. Signal, not a compliance guarantee.
-          </p>
-          <PersonaPanel personas={pack.personas} />
-        </div>
-      </section>
+        <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+          <Field label="Project name">
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="input"
+              placeholder="MyDigital ID Onboarding"
+              required
+            />
+          </Field>
+          <Field label="Description">
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="input min-h-[80px]"
+              placeholder="National e-ID sign-up flow"
+            />
+          </Field>
 
-      {/* Remediation */}
-      <section className="is-card">
-        <p className="is-eyebrow">Prioritized</p>
-        <h2 className="is-h2">Remediation</h2>
-        <Remediation items={pack.remediation} />
-      </section>
-    </main>
+          <div className="border-t border-hairline pt-5">
+            <div className="section-label mb-4">First repo</div>
+            <Field label="Repo name">
+              <input
+                type="text"
+                value={repoName}
+                onChange={(e) => setRepoName(e.target.value)}
+                className="input"
+                placeholder="mydigital-web (staging)"
+              />
+            </Field>
+            <Field label="Staging URL">
+              <input
+                type="url"
+                value={stagingUrl}
+                onChange={(e) => setStagingUrl(e.target.value)}
+                className="input"
+                placeholder="https://staging.example.com"
+              />
+            </Field>
+            <Field label="Viewport">
+              <select
+                value={viewport}
+                onChange={(e) => setViewport(e.target.value as Viewport)}
+                className="input"
+              >
+                <option value="desktop">Desktop</option>
+                <option value="tablet">Tablet</option>
+                <option value="mobile">Mobile</option>
+              </select>
+            </Field>
+          </div>
+
+          <button
+            type="submit"
+            disabled={saving || !name.trim()}
+            className="w-full rounded-xl bg-brand py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {saving ? "Creating..." : "Create project"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1.5 block text-[12px] font-semibold uppercase tracking-[0.06em] text-tertiary">
+        {label}
+      </label>
+      {children}
+    </div>
   );
 }
