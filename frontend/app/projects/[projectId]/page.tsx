@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
   getProject,
   getProjectRuns,
   getPersonas,
-  startRun,
   linkPersona,
   unlinkPersona,
 } from "@/lib/api";
@@ -16,13 +15,12 @@ import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
 import { FrictionMatrix } from "@/components/FrictionMatrix";
-import { StatusDot } from "@/components/StatusDot";
+import AssessmentRunner from "@/components/AssessmentRunner";
 
 type Tab = "overview" | "personas" | "runs";
 
 export default function ProjectDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const projectId = params.projectId as string;
   const [tab, setTab] = useState<Tab>("overview");
 
@@ -31,8 +29,7 @@ export default function ProjectDetailPage() {
   const [allPersonas, setAllPersonas] = useState<Persona[]>([]);
   const [loading, setLoading] = useState(true);
   const [runMode, setRunMode] = useState<RunMode>("sequential");
-  const [startingRun, setStartingRun] = useState(false);
-  const [showPersonaModal, setShowPersonaModal] = useState(false);
+  const [showRunner, setShowRunner] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -47,11 +44,10 @@ export default function ProjectDetailPage() {
     });
   }, [projectId]);
 
-  async function handleStartRun() {
-    if (!project?.repos[0]) return;
-    setStartingRun(true);
-    const { runId } = await startRun(project.repos[0].id, runMode);
-    router.push(`/projects/${projectId}/runs/${runId}/live`);
+  // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner.
+  function handleStartRun() {
+    setShowRunner(true);
+    setTab("overview");
   }
 
   if (loading) {
@@ -112,10 +108,9 @@ export default function ProjectDetailPage() {
           <button
             type="button"
             onClick={handleStartRun}
-            disabled={startingRun || !project.repos[0]}
-            className="rounded-xl bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="rounded-xl bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
           >
-            {startingRun ? "Starting..." : "▶ Run acceptance test"}
+            ▶ Run acceptance test
           </button>
         </div>
       </div>
@@ -141,6 +136,21 @@ export default function ProjectDetailPage() {
       </div>
 
       <div className="px-10 py-8">
+        {showRunner && tab === "overview" && (
+          <div className="mb-8">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="section-label">Acceptance test — live agent run</h2>
+              <button
+                type="button"
+                onClick={() => setShowRunner(false)}
+                className="text-[12px] text-secondary hover:text-primary"
+              >
+                Hide
+              </button>
+            </div>
+            <AssessmentRunner defaultAppName={project.name} />
+          </div>
+        )}
         {tab === "overview" && (
           <OverviewTab project={project} personaNames={personaNames} />
         )}

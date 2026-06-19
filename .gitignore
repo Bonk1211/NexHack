@@ -22,6 +22,7 @@ npm-debug.log*
 playwright-report/
 test-results/
 /backend/.playwright/
+.playwright-mcp/
 
 # LangGraph per-run checkpoint store (§8 run graph)
 checkpoints.sqlite
@@ -29,6 +30,7 @@ checkpoints.sqlite
 
 # Artifacts
 /artifacts/
+.artifacts/
 *.pdf
 screenshots/
 replays/

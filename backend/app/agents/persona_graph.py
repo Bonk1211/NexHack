@@ -98,6 +98,7 @@ def comprehend(state: PersonaState) -> dict:
     return {
         "last_confusion": j.confusion,
         "last_fallback": j.fallback_target,
+        "last_reason": j.reason,
         "current_labeled": labeled,
     }
 
@@ -251,6 +252,68 @@ def _run_persona_sync(payload: PersonaInput) -> PersonaState:
         }
         return _PERSONA_GRAPH.invoke(state)
     finally:
+        browser.close()
+        p.stop()
+
+
+def stream_persona(payload: PersonaInput, on_frame=None):
+    """Yield (node_name, update) for each subgraph step as it runs — LIVE.
+
+    The streaming counterpart of `run_persona`: instead of one `.invoke`, it drives
+    the subgraph with `.stream(stream_mode="updates")` so the caller can surface each
+    node (observe→comprehend→decide→act) the moment it completes — the agent visibly
+    testing the target app step by step. Owns the Playwright lifecycle around the
+    stream so the browser survives the whole graph.
+
+    If `on_frame` is given, a Chrome DevTools screencast is attached and `on_frame`
+    is called with each base64 JPEG frame of the live page — so the caller can render
+    the actual browser the agent drives (the external app) inside the dashboard.
+    Frame events fire during Playwright calls (sync API pumps them), so the callback
+    runs on THIS thread; keep it non-blocking (e.g. a bounded queue put).
+
+    MUST be called from a thread WITHOUT a running asyncio loop (sync Playwright) —
+    e.g. a Starlette threadpool worker (a sync generator endpoint qualifies).
+    """
+    p = sync_playwright().start()
+    browser = p.chromium.launch()
+    cdp = None
+    try:
+        page = browser.new_page(**p.devices[payload.get("viewport", "iPhone 13")])
+
+        if on_frame is not None:
+            cdp = page.context.new_cdp_session(page)
+
+            def _frame(f):
+                try:
+                    on_frame(f["data"])  # base64 JPEG
+                    cdp.send("Page.screencastFrameAck", {"sessionId": f["sessionId"]})
+                except Exception:  # noqa: BLE001 — never let screencast break the run
+                    pass
+
+            cdp.on("Page.screencastFrame", _frame)
+            cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": 50, "maxWidth": 420, "maxHeight": 900,
+                "everyNthFrame": 1,
+            })
+
+        state: PersonaState = {
+            **payload,
+            "page": page,
+            "rng": random.Random(payload["seed"]),
+            "step_idx": 0,
+            "steps": [],
+            "shots": [],
+            "status": "running",
+        }
+        for update in _PERSONA_GRAPH.stream(state, stream_mode="updates"):
+            for node, data in update.items():
+                yield node, data
+    finally:
+        if cdp is not None:
+            try:
+                cdp.send("Page.stopScreencast")
+            except Exception:  # noqa: BLE001
+                pass
         browser.close()
         p.stop()
 

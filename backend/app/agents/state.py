@@ -78,6 +78,7 @@ class PersonaState(PersonaInput, total=False):
     current_give_up: bool
     last_confusion: float
     last_fallback: Optional[str]
+    last_reason: str
 
     # Control-flow status read by route_next ("running"|"blocked"|"completed")
     status: str
