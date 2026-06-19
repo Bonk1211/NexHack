@@ -8,24 +8,34 @@ export type RunMode = "sequential" | "parallel";
 export type FigurineStatus = "none" | "generating" | "ready" | "failed";
 export type Viewport = "desktop" | "tablet" | "mobile";
 
-export interface BehaviorProfile {
-  dwellMultiplier: number; // 0.5..3   — how long they linger per step
-  hesitationProb: number; // 0..1     — chance of pausing/second-guessing
-  readingSpeedWpm: number; // words per minute
-  giveupThresholdS: number; // seconds before abandoning a step
-  retryLimit: number; // attempts before blocked
+// TODO(cohort-sampling): BehaviorValue is currently always a plain number.
+// When cohort mode is enabled, each field can become { mean, spread } to seed
+// N personas from the same demographic with varied parameters.
+export type BehaviorValue = number | { mean: number; spread: number };
+
+export function resolveValue(v: BehaviorValue): number {
+  return typeof v === "number" ? v : v.mean;
+}
+
+export interface PersonaIdentity {
+  name: string;
+  label: string;
+  ageBand: string;
+  language: string;
+  techSavviness: number;
+  disabilities: string[];
+}
+
+export interface PersonaBehavior {
+  dwellMultiplier: BehaviorValue;
+  giveupThresholdS: BehaviorValue;
+  misinterpretProb: BehaviorValue;
 }
 
 export interface Persona {
   id: string;
-  name: string;
-  label: string; // e.g. "OKU — visual (low-vision)"
-  ageBand: string;
-  techSavviness: number; // 0..1
-  patience: number; // 0..1
-  language: string;
-  disabilities: string[];
-  behaviorProfile: BehaviorProfile;
+  identity: PersonaIdentity;
+  behavior: PersonaBehavior;
   figurineUrl?: string;
   figurineStatus: FigurineStatus;
 }
@@ -57,6 +67,9 @@ export interface PersonaStepResult {
   stepName: string;
   status: Severity;
   dwellMs: number;
+  innerMonologue: string;
+  confusionLevel: number;
+  understandability: number;
 }
 
 export interface PersonaResult {
@@ -108,7 +121,9 @@ export interface PersonaStepEvent {
   stepName: string;
   status: Severity;
   dwellMs: number;
-  confusionScore: number; // running per-lane confusion
+  confusionScore: number;
+  innerMonologue: string;
+  confusionLevel: number;
 }
 
 export interface PersonaDoneEvent {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import { subscribeToRun, FLOW_STEPS } from "@/lib/sse";
 import { getPersonas } from "@/lib/api";
@@ -13,15 +13,28 @@ interface LaneState {
   steps: { stepName: string; status: Severity | "pending"; dwellMs: number | null }[];
   activeStep: number;
   confusionScore: number;
+  confusionLevel: number;
+  innerMonologue: string;
   done: boolean;
   blocked: boolean;
   blockedAt?: string;
   completed: boolean;
 }
 
+function laneAccentColor(confusionLevel: number): string {
+  if (confusionLevel >= 0.7) return "#c8362f";
+  if (confusionLevel >= 0.35) return "#b25e00";
+  return "#1d8a4e";
+}
+
+function laneBgClass(confusionLevel: number, blocked: boolean): string {
+  if (blocked) return "bg-tint-blocked";
+  if (confusionLevel >= 0.5) return "bg-[#fef9f5]";
+  return "bg-card";
+}
+
 export default function LiveRunPage() {
   const params = useParams();
-  const router = useRouter();
   const projectId = params.projectId as string;
   const runId = params.runId as string;
 
@@ -31,8 +44,6 @@ export default function LiveRunPage() {
   const [done, setDone] = useState(false);
   const [started, setStarted] = useState(false);
 
-  const lanesRef = useRef<LaneState[]>([]);
-
   useEffect(() => {
     getPersonas().then((p) => {
       setPersonas(p);
@@ -41,12 +52,13 @@ export default function LiveRunPage() {
         steps: FLOW_STEPS.map((stepName) => ({ stepName, status: "pending" as const, dwellMs: null })),
         activeStep: -1,
         confusionScore: 0,
+        confusionLevel: 0,
+        innerMonologue: "",
         done: false,
         blocked: false,
         completed: false,
       }));
       setLanes(initial);
-      lanesRef.current = initial;
     });
   }, []);
 
@@ -66,6 +78,8 @@ export default function LiveRunPage() {
             steps,
             activeStep: event.stepIdx,
             confusionScore: event.confusionScore,
+            confusionLevel: event.confusionLevel,
+            innerMonologue: event.innerMonologue,
           };
         }),
       );
@@ -109,13 +123,9 @@ export default function LiveRunPage() {
     <div className="min-h-screen bg-field">
       <div className="flex items-center justify-between border-b border-hairline px-10 py-4">
         <div className="flex items-center gap-2 text-[13px] text-secondary">
-          <Link href="/" className="text-brand no-underline hover:underline">
-            Home
-          </Link>
+          <Link href="/" className="text-brand no-underline hover:underline">Home</Link>
           <span>/</span>
-          <Link href={`/projects/${projectId}`} className="text-brand no-underline hover:underline">
-            Project
-          </Link>
+          <Link href={`/projects/${projectId}`} className="text-brand no-underline hover:underline">Project</Link>
           <span>/</span>
           <span className="text-primary">Live run</span>
         </div>
@@ -133,17 +143,13 @@ export default function LiveRunPage() {
         <div className="rise mb-8 flex items-center justify-between">
           <div>
             <h1 className="font-display text-[28px] text-primary">Live acceptance test</h1>
-            <p className="mt-1 text-[14px] text-secondary">
-              {done ? "Run complete" : "Running..."}
-            </p>
+            <p className="mt-1 text-[14px] text-secondary">{done ? "Run complete" : "Running..."}</p>
           </div>
           <div className="text-right">
             <div className="font-display text-[48px] leading-none tabular-nums text-primary">
               {overallScore != null ? scorePct(overallScore) : "—"}
             </div>
-            <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
-              Score
-            </div>
+            <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">Score</div>
           </div>
         </div>
 
@@ -154,26 +160,23 @@ export default function LiveRunPage() {
             return (
               <div
                 key={lane.personaId}
-                className={`rise rounded-[16px] p-5 transition-colors ${
-                  lane.blocked ? "bg-tint-blocked" : "bg-card"
-                } shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]`}
-                style={{ animationDelay: `${i * 30}ms` }}
+                className={`rise rounded-[16px] transition-colors ${laneBgClass(lane.confusionLevel, lane.blocked)} shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]`}
+                style={{
+                  animationDelay: `${i * 30}ms`,
+                  borderLeft: lane.confusionLevel > 0.05
+                    ? `3px solid ${laneAccentColor(lane.confusionLevel)}`
+                    : undefined,
+                }}
               >
-                <div className="flex items-center gap-5">
+                <div className="flex items-start gap-5 p-5">
                   <div className="flex w-[160px] shrink-0 items-center gap-3">
                     <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-field">
                       {persona.figurineUrl && (
-                        <img
-                          src={persona.figurineUrl}
-                          alt={persona.name}
-                          className="h-10 w-10 rounded-full object-cover"
-                        />
+                        <img src={persona.figurineUrl} alt={persona.identity.name} className="h-10 w-10 rounded-full object-cover" />
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="truncate text-[14px] font-medium text-primary">
-                        {persona.name}
-                      </div>
+                      <div className="truncate text-[14px] font-medium text-primary">{persona.identity.name}</div>
                       <div className="text-[11px] tabular-nums text-tertiary">
                         {lane.done
                           ? lane.blocked
@@ -184,15 +187,29 @@ export default function LiveRunPage() {
                     </div>
                   </div>
 
-                  <div className="flex flex-1 items-center gap-2">
-                    {lane.steps.map((step, si) => (
-                      <StepCell
-                        key={step.stepName}
-                        step={step}
-                        isActive={si === lane.activeStep && !lane.done}
-                        isBlocked={lane.blocked && lane.blockedAt === step.stepName}
-                      />
-                    ))}
+                  <div className="flex flex-1 flex-col gap-3">
+                    <div className="flex items-center gap-2">
+                      {lane.steps.map((step, si) => (
+                        <StepCell
+                          key={step.stepName}
+                          step={step}
+                          isActive={si === lane.activeStep && !lane.done}
+                          isBlocked={lane.blocked && lane.blockedAt === step.stepName}
+                        />
+                      ))}
+                    </div>
+
+                    {lane.innerMonologue && (
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+                          Simulated reasoning
+                        </div>
+                        <ThoughtLine
+                          text={lane.innerMonologue}
+                          blocked={lane.blocked && lane.done}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -216,6 +233,18 @@ export default function LiveRunPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function ThoughtLine({ text, blocked }: { text: string; blocked: boolean }) {
+  return (
+    <p
+      className={`mt-1 text-[13px] leading-relaxed transition-opacity duration-300 motion-reduce:transition-none ${
+        blocked ? "font-medium text-blocked" : "italic text-secondary"
+      }`}
+    >
+      &ldquo;{text}&rdquo;
+    </p>
   );
 }
 

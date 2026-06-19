@@ -69,14 +69,14 @@ function PersonaLibraryCard({ persona }: { persona: Persona }) {
           ) : (
             <img
               src={persona.figurineUrl}
-              alt={persona.name}
+              alt={persona.identity.name}
               className="h-12 w-12 rounded-full object-cover"
             />
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-[17px] text-primary">{persona.name}</h3>
-          <p className="mt-0.5 truncate text-[12px] text-tertiary">{persona.label}</p>
+          <h3 className="truncate font-display text-[17px] text-primary">{persona.identity.name}</h3>
+          <p className="mt-0.5 truncate text-[12px] text-tertiary">{persona.identity.label}</p>
         </div>
       </div>
 

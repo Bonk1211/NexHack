@@ -1,5 +1,8 @@
 // Small pure helpers — no dependencies, safe on server or client.
 
+import type { BehaviorValue } from "./types";
+import { resolveValue } from "./types";
+
 /** "3h ago", "2d ago", "just now" from an ISO string. */
 export function relativeTime(iso?: string): string {
   if (!iso) return "—";
@@ -61,28 +64,38 @@ export function generateFigurine(seed: string, name: string): string {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-/** Human-readable one-liner derived from a persona's behavior sliders. */
+/** Human-readable one-liner derived from identity + behavior params. */
 export function behaviorSentence(p: {
   name: string;
   techSavviness: number;
-  patience: number;
-  behaviorProfile: { dwellMultiplier: number; hesitationProb: number; giveupThresholdS: number };
+  behavior: { dwellMultiplier: BehaviorValue; giveupThresholdS: BehaviorValue; misinterpretProb: BehaviorValue };
 }): string {
-  const tech =
-    p.techSavviness < 0.34 ? "is unfamiliar with digital forms" : p.techSavviness < 0.67 ? "is moderately confident online" : "navigates interfaces fluently";
-  const pace = p.behaviorProfile.dwellMultiplier > 1.6 ? "reads slowly" : p.behaviorProfile.dwellMultiplier > 1.1 ? "takes their time" : "moves quickly";
-  const patience =
-    p.patience < 0.34 ? `gives up after ~${Math.round(p.behaviorProfile.giveupThresholdS)}s of friction` : p.patience < 0.67 ? "tolerates some confusion before leaving" : "perseveres through obstacles";
-  const hesitate = p.behaviorProfile.hesitationProb > 0.5 ? ", hesitating often" : "";
-  return `${p.name} ${tech}, ${pace}${hesitate}, and ${patience}.`;
+  const dwell = resolveValue(p.behavior.dwellMultiplier);
+  const giveup = resolveValue(p.behavior.giveupThresholdS);
+  const misread = resolveValue(p.behavior.misinterpretProb);
+  const pace = dwell > 1.6 ? "Reads slowly" : dwell > 1.1 ? "Takes their time" : "Moves quickly through screens";
+  const misreadText =
+    misread > 0.5
+      ? "often misinterprets unclear labels"
+      : misread > 0.25
+        ? "sometimes misreads ambiguous text"
+        : "rarely misreads instructions";
+  const giveupText =
+    giveup <= 30
+      ? "gives up quickly when stuck"
+      : giveup <= 55
+        ? "tolerates some friction before leaving"
+        : "perseveres through obstacles";
+  return `${pace}, ${misreadText}, and ${giveupText}.`;
 }
 
 /** Short behavior chips for cards. */
-export function behaviorChips(p: { patience: number; techSavviness: number; disabilities: string[] }): string[] {
+export function behaviorChips(p: { identity: { techSavviness: number; disabilities: string[] }; behavior: { misinterpretProb: BehaviorValue } }): string[] {
+  const misread = resolveValue(p.behavior.misinterpretProb);
   const chips: string[] = [];
-  if (p.patience < 0.34) chips.push("low patience");
-  if (p.techSavviness < 0.34) chips.push("low tech");
-  else if (p.techSavviness > 0.75) chips.push("power user");
-  for (const d of p.disabilities.slice(0, 2)) chips.push(d);
+  if (p.identity.techSavviness < 0.34) chips.push("low tech");
+  else if (p.identity.techSavviness > 0.75) chips.push("power user");
+  if (misread > 0.4) chips.push("misreads labels");
+  for (const d of p.identity.disabilities.slice(0, 2)) chips.push(d);
   return chips.slice(0, 3);
 }

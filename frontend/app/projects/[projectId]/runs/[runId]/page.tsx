@@ -9,6 +9,7 @@ import { scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
 import { FrictionMatrix } from "@/components/FrictionMatrix";
+import { RunLog } from "@/components/RunLog";
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -24,7 +25,7 @@ export default function RunDetailPage() {
       setRun(r);
       const names: Record<string, string> = {};
       personas.forEach((p) => {
-        names[p.id] = p.name;
+        names[p.id] = p.identity.name;
       });
       setPersonaNames(names);
       setLoading(false);
@@ -49,7 +50,7 @@ export default function RunDetailPage() {
   }
 
   const blockedPersonas = run.personaResults.filter((p) => p.status === "blocked");
-  const atRiskNames = blockedPersonas.map((p) => p.persona.name).join(", ");
+  const atRiskNames = blockedPersonas.map((p) => p.persona.identity.name).join(", ");
 
   return (
     <div>
@@ -93,6 +94,7 @@ export default function RunDetailPage() {
 
         <PersonaWall results={run.personaResults} />
         <FrictionMatrix matrix={run.frictionMatrix} personaNames={personaNames} />
+        <RunLog results={run.personaResults} />
       </div>
     </div>
   );
