@@ -104,5 +104,8 @@ output feeds only the indicative stream and the output-side narrative.
 
 ## Next Steps
 - [ ] `/code-review` the diff
-- [ ] Live-key smoke: set `LLM_API_KEY` and confirm per-step `llm_confusion` varies + coherent synthesis (deferred — no DeepSeek key in env)
+- [x] Live-key smoke (2026-06-19): DeepSeek key set; model ids `deepseek-v4-flash`/`deepseek-v4-pro`
+  valid against the live endpoint. `vision_judge` confusion VARIES (0.0 labeled vs 0.8 unlabeled,
+  not the 0/1 heuristic) with coherent reasons; `synthesize` rollup/narrative grounded in the pack
+  (names `oku_visual` P0 at `otp`, no invented WCAG). Auth + `json_mode` confirmed.
 - [ ] `/prp-pr` to open the PR

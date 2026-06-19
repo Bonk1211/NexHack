@@ -77,6 +77,19 @@ def test_evidence_attaches_synthesis(pack):
     assert "screenshots" in pack
 
 
+def test_evidence_attaches_empathy_replay(pack):
+    # §14: per-persona replay block — lenses from disability, frames per step.
+    replay = pack["replay"]
+    assert set(replay) == {"control", "oku_visual"}
+    assert replay["control"]["lenses"] == []                      # baseline, no lens
+    assert "low_vision_blur" in replay["oku_visual"]["lenses"]    # low_vision persona
+    frames = replay["oku_visual"]["frames"]
+    assert [f["step_key"] for f in frames] == [s["step_key"] for s in
+            next(p for p in pack["personas"] if p["persona"] == "oku_visual")["steps"]]
+    # frames carry status + a screenshot ref + a readable caption
+    assert all("status" in f and "screenshot_url" in f and f["caption"] for f in frames)
+
+
 def test_reinvoking_completed_run_id_is_idempotent(monkeypatch, tmp_path):
     # Re-invoking a COMPLETED run_id must return the same pack — NOT re-run and
     # NOT duplicate personas via the persona_results reducer. Assert the full

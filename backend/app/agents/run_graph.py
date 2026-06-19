@@ -35,7 +35,7 @@ from app.agents.persona_graph import run_persona
 from app.agents.state import PersonaInput, RunState
 from app.alerts import send_alerts
 from app.config import settings
-from app.evidence.pack import PersonaRunResult, build_pack
+from app.evidence.pack import PersonaRunResult, build_pack, build_replay
 from app.scoring.engine import (
     Composite,
     PersonaThresholds,
@@ -140,6 +140,22 @@ def evidence(state: RunState) -> dict:
     """Assemble the §13 pack + attach the optional once-per-run synthesis."""
     pack = build_pack(state["app"], state["run_at"], state["scored"])
     pack["screenshots"] = {raw["persona"]: raw["shots"] for raw in state["ordered"]}
+
+    # §14 empathy-replay refs per persona: lenses (from disability tags) + ordered
+    # frames keyed to the captured screenshots. Storage upload upgrades the local
+    # refs to public URLs in app.repository.
+    disab = {p["stem"]: p.get("disabilities", []) for p in state["personas"]}
+    matrix_rows = pack["matrix"]["rows"]
+    pack["replay"] = {
+        p["persona"]: build_replay(
+            disab.get(p["persona"], []),
+            p["steps"],
+            pack["screenshots"].get(p["persona"], []),
+            matrix_rows.get(p["persona"], {}),
+        )
+        for p in pack["personas"]
+    }
+
     pack["synthesis"] = synthesize(pack).model_dump()
     return {"pack": pack}
 

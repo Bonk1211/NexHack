@@ -8,6 +8,8 @@ from app.evidence.pack import (
     build_friction_matrix,
     build_pack,
     build_remediation,
+    build_replay,
+    lenses_for,
     route_owner,
 )
 from app.scoring.engine import PersonaThresholds, StepSignals, WcagSignal, score
@@ -44,6 +46,40 @@ def test_matrix_shows_hero_diff():
     # Same step: green for control, red for the protected persona — the §14 diff.
     assert matrix["rows"]["control"]["otp"]["status"] == "green"
     assert matrix["rows"]["oku_visual"]["otp"]["status"] == "red"
+
+
+def test_lenses_for_dedupes_and_maps_disability():
+    assert lenses_for([]) == []                                   # baseline persona
+    assert lenses_for(["low_vision"]) == ["low_vision_blur", "contrast"]
+    assert lenses_for(["motor"]) == ["tap_target_overlay"]
+    assert lenses_for(["low_vision", "low_vision"]) == ["low_vision_blur", "contrast"]
+    assert lenses_for(["nonsense"]) == []                         # unknown tag → no lens
+
+
+def test_build_replay_frames_carry_status_url_and_caption():
+    visual = _run("oku_visual", [StepSignals(0, "home", dwell_s=4), _otp_blocked()])
+    pack = build_pack("DemoBank", "2026-06-19T00:00:00Z", [visual])
+    steps = pack["personas"][0]["steps"]
+    row = pack["matrix"]["rows"]["oku_visual"]
+    shots = ["s3://home.png", "s3://otp.png"]
+
+    replay = build_replay(["low_vision"], steps, shots, row)
+
+    assert replay["lenses"] == ["low_vision_blur", "contrast"]
+    assert [f["step_key"] for f in replay["frames"]] == ["home", "otp"]
+    otp = replay["frames"][1]
+    assert otp["status"] == "red"                                 # matches the hero diff
+    assert otp["screenshot_url"] == "s3://otp.png"
+    assert otp["caption"].startswith("blocked")                   # dead-end at critical step
+    assert replay["frames"][0]["caption"] == "ok"
+
+
+def test_build_replay_tolerates_short_shot_list():
+    visual = _run("oku_visual", [StepSignals(0, "home", dwell_s=4), _otp_blocked()])
+    pack = build_pack("DemoBank", "2026-06-19T00:00:00Z", [visual])
+    steps = pack["personas"][0]["steps"]
+    replay = build_replay([], steps, [], pack["matrix"]["rows"]["oku_visual"])
+    assert all(f["screenshot_url"] is None for f in replay["frames"])
 
 
 def test_matrix_handles_missing_step():

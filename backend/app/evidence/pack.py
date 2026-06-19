@@ -3,9 +3,9 @@
 The differentiated output that carries the marks a demo can't (§13, §24). Per app,
 per run it assembles: exec summary, persona x step friction matrix (the hero
 artifact, FR-3.3), WCAG findings (trusted, mapped to criteria), prioritized
-remediation routed to owning area (FR-4.3), and a JSON export (PDF is a thin
-render on top — stubbed). Empathy-replay clips are referenced by screenshot/replay
-URL, produced by the nav agent.
+remediation routed to owning area (FR-4.3), and a JSON export (PDF render lives in
+evidence.export). Empathy-replay clips are referenced by screenshot/replay URL;
+screenshots are captured by the nav agent and uploaded to Storage in app.repository.
 
 Two-stream discipline (§16): `wcag_conformance` (trusted) stays distinct from
 `behavioral_note` (indicative) everywhere in the output.
@@ -138,6 +138,71 @@ def _step_detail(s: StepSignals) -> dict:
     }
 
 
+# §14 empathy-replay lenses: a persona's disability tags → the visual transforms
+# the frontend applies over the captured frames (render the screen "through the
+# persona's lens"). Pure: the lens follows from WHO the persona is, not the run.
+_LENS_BY_DISABILITY = {
+    "low_vision": ["low_vision_blur", "contrast"],
+    "color_blind": ["daltonize"],
+    "motor": ["tap_target_overlay"],
+    "hearing": ["caption_cue"],
+    "low_literacy": ["reading_load"],
+    "cognitive": ["reading_load"],
+}
+
+
+def lenses_for(disabilities: list[str]) -> list[str]:
+    """Empathy-replay lenses for a persona (§14), deduped in declaration order."""
+    out: list[str] = []
+    for d in disabilities:
+        for lens in _LENS_BY_DISABILITY.get(d, []):
+            if lens not in out:
+                out.append(lens)
+    return out
+
+
+def _frame_caption(step: dict) -> str:
+    """One-line, demo-readable note for an empathy-replay frame (§14)."""
+    fails = step.get("axe_violations") or []
+    if step.get("dead_end"):
+        if fails:
+            return f"blocked — {_ISSUE_TEXT.get(fails[0], 'WCAG ' + fails[0])}"
+        return "blocked — could not proceed"
+    if fails:
+        return f"friction — {_ISSUE_TEXT.get(fails[0], 'WCAG ' + fails[0])}"
+    if step.get("backtracked"):
+        return "hesitation — retried this step"
+    return "ok"
+
+
+def build_replay(
+    disabilities: list[str],
+    steps: list[dict],
+    shots: list,
+    matrix_row: dict,
+) -> dict:
+    """Per-persona empathy-replay clip (§14): the persona's lenses + ordered frames.
+
+    PURE. `steps` are the pack's per-step details, `shots` the per-step screenshot
+    refs (a local path at build time, a Storage URL after upload — the caller owns
+    that), `matrix_row` the friction-matrix row that supplies each frame's status.
+    """
+    frames = [
+        {
+            "step_idx": st["step_idx"],
+            "step_key": st["step_key"],
+            "status": matrix_row.get(st["step_key"], {}).get("status", "na"),
+            "dwell_s": st.get("dwell_s"),
+            "screenshot_url": (
+                shots[st["step_idx"]] if shots and st["step_idx"] < len(shots) else None
+            ),
+            "caption": _frame_caption(st),
+        }
+        for st in steps
+    ]
+    return {"lenses": lenses_for(disabilities), "frames": frames}
+
+
 def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
     """Assemble the §13 evidence pack JSON from per-persona results.
 
@@ -177,6 +242,7 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
         "matrix": build_friction_matrix(runs),  # hero artifact (FR-3.3)
         "personas": personas,
         "remediation": build_remediation(runs),
-        # TODO: pdf_url / json_url filled by orchestrator after persisting to Storage.
-        # TODO(§14): attach empathy-replay clip refs per persona (screenshot/replay URLs).
+        # `screenshots`, `replay` (§14), and `synthesis` (§15) are attached by the run
+        # graph's evidence node; `pdf_url`/`json_url` are filled on Storage upload
+        # (app.repository) — all kept out of this PURE builder.
     }
