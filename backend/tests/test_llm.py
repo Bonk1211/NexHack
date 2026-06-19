@@ -73,26 +73,21 @@ class _FakeClient:
         return _FakeStructured(self._result)
 
 
-def test_vision_structured_value_flows_through(monkeypatch, tmp_path):
+def test_vision_structured_value_flows_through(monkeypatch):
     monkeypatch.setattr(llm.settings, "llm_api_key", "present")
-    monkeypatch.setattr(llm, "_downscale_b64", lambda _p: "Zg==")  # skip real image work
     fake = _FakeClient(VisionJudgment(confusion=0.7, reason="ambiguous", fallback_target="OTP"))
     monkeypatch.setattr(llm, "_client", lambda _m: fake)
-    shot = tmp_path / "s.png"
-    shot.write_bytes(b"x")
-    j = vision_judge(str(shot), "otp", "- textbox", requires_labels=False, labeled=True, action="fill")
+    # Judged from the a11y tree (text-only endpoint); no screenshot needed.
+    j = vision_judge(None, "otp", "- textbox", requires_labels=False, labeled=True, action="fill")
     assert j.confusion == 0.7
     assert j.fallback_target == "OTP"
 
 
-def test_vision_falls_back_on_client_error(monkeypatch, tmp_path):
+def test_vision_falls_back_on_client_error(monkeypatch):
     monkeypatch.setattr(llm.settings, "llm_api_key", "present")
-    monkeypatch.setattr(llm, "_downscale_b64", lambda _p: "Zg==")
     monkeypatch.setattr(llm, "_client", lambda _m: _FakeClient(raises=True))
-    shot = tmp_path / "s.png"
-    shot.write_bytes(b"x")
     # Label-dependent unlabeled fill => heuristic 1.0 even though the client raised.
-    j = vision_judge(str(shot), "otp", "- textbox", requires_labels=True, labeled=False, action="fill")
+    j = vision_judge(None, "otp", "- textbox", requires_labels=True, labeled=False, action="fill")
     assert j.confusion == 1.0
 
 

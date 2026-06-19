@@ -43,7 +43,7 @@ def persist_run(pack: dict) -> str:
     ).execute()
 
     # run_personas (§17): one row per persona verdict (indicative stream).
-    matrix_rows = pack.get("matrix", {}).get("rows", {})
+    screenshots = pack.get("screenshots", {})
     for p in pack.get("personas", []):
         rp_id = str(uuid.uuid4())
         client.table("run_personas").insert(
@@ -58,17 +58,25 @@ def persist_run(pack: dict) -> str:
             }
         ).execute()
 
-        # screen_events (§17): one row per step cell of the friction matrix.
-        cells = matrix_rows.get(p.get("persona"), {})
-        for step_idx, (step_key, cell) in enumerate(cells.items()):
+        # screen_events (§17): one row per step, carrying BOTH streams kept distinct —
+        # wcag_conformance/axe_violations (TRUSTED) and llm_judgment (INDICATIVE) — plus
+        # the screenshot ref (a local path until Storage upload; see pack.py TODO).
+        shots = screenshots.get(p.get("persona"), [])
+        for sd in p.get("steps", []):
+            idx = sd.get("step_idx", 0)
             client.table("screen_events").insert(
                 {
                     "id": str(uuid.uuid4()),
                     "run_personas_id": rp_id,
-                    "step_idx": step_idx,
-                    "action": step_key,
-                    "dwell_ms": int((cell.get("dwell_s") or 0) * 1000),
+                    "step_idx": idx,
+                    "action": sd.get("step_key"),
+                    "dwell_ms": int((sd.get("dwell_s") or 0) * 1000),
+                    "backtracked": bool(sd.get("backtracked")),
+                    "axe_violations": sd.get("axe_violations", []),
+                    "wcag_conformance": sd.get("wcag_conformance", {}),   # TRUSTED
+                    "llm_judgment": sd.get("llm_judgment", {}),           # INDICATIVE
                     "severity": p.get("severity"),
+                    "screenshot_url": shots[idx] if idx < len(shots) else None,
                 }
             ).execute()
 

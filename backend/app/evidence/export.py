@@ -14,6 +14,7 @@ Rendering is headless — reportlab.platypus needs no browser.
 """
 from __future__ import annotations
 
+import io
 import json
 
 from reportlab.lib import colors
@@ -29,10 +30,15 @@ from reportlab.platypus import (
 )
 
 
+def pack_to_json_bytes(pack: dict) -> bytes:
+    """Serialize the evidence pack as pretty UTF-8 JSON bytes (HTTP download)."""
+    return json.dumps(pack, indent=2, ensure_ascii=False).encode("utf-8")
+
+
 def pack_to_json(pack: dict, path: str) -> str:
     """Write the evidence pack as pretty JSON to `path`; return `path`."""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(pack, f, indent=2, ensure_ascii=False)
+    with open(path, "wb") as f:
+        f.write(pack_to_json_bytes(pack))
     return path
 
 
@@ -57,14 +63,19 @@ def _table(rows: list[list], header_bg: colors.Color) -> Table:
     return t
 
 
-def pack_to_pdf(pack: dict, path: str) -> str:
-    """Render the evidence pack as an audit-style PDF to `path`; return `path`."""
+def _render_pdf(pack: dict, target) -> None:
+    """Render the evidence pack as an audit-style PDF into `target`.
+
+    `target` may be a filesystem path (str) or a binary file-like buffer —
+    `SimpleDocTemplate` accepts either, which lets us serve the PDF over HTTP
+    without touching disk.
+    """
     styles = getSampleStyleSheet()
     h1, h2, body = styles["Title"], styles["Heading2"], styles["BodyText"]
     note = styles["Italic"]
 
     doc = SimpleDocTemplate(
-        path,
+        target,
         pagesize=A4,
         leftMargin=18 * mm,
         rightMargin=18 * mm,
@@ -160,4 +171,16 @@ def pack_to_pdf(pack: dict, path: str) -> str:
     story.append(_table(rem_rows, colors.HexColor("#37474f")))
 
     doc.build(story)
+
+
+def pack_to_pdf(pack: dict, path: str) -> str:
+    """Render the evidence pack as an audit-style PDF to `path`; return `path`."""
+    _render_pdf(pack, path)
     return path
+
+
+def pack_to_pdf_bytes(pack: dict) -> bytes:
+    """Render the evidence pack as audit-style PDF bytes (HTTP download)."""
+    buf = io.BytesIO()
+    _render_pdf(pack, buf)
+    return buf.getvalue()

@@ -87,3 +87,21 @@ def test_empty_pack_is_neutral():
     pack = build_pack("X", "2026-06-19T00:00:00Z", [])
     assert pack["inclusion_score"] == 1.0
     assert pack["remediation"] == []
+
+
+def test_pack_carries_per_step_two_streams():
+    # Per-step detail must travel with each persona: trusted wcag_conformance +
+    # indicative llm_judgment, kept distinct (§16). Feeds DB persistence + the UI.
+    visual = _run("oku_visual", [
+        StepSignals(0, "home", dwell_s=3),
+        StepSignals(1, "otp", critical=True, wcag=(WcagSignal("4.1.2", False),),
+                    dead_end=True, completed=False, llm_confusion=1.0),
+    ])
+    pack = build_pack("DemoBank", "2026-06-19T00:00:00Z", [visual])
+    steps = next(p for p in pack["personas"] if p["persona"] == "oku_visual")["steps"]
+    assert [s["step_key"] for s in steps] == ["home", "otp"]
+    otp = steps[1]
+    assert otp["wcag_conformance"] == {"4.1.2": "fail"}     # TRUSTED
+    assert otp["axe_violations"] == ["4.1.2"]
+    assert otp["llm_judgment"] == {"confusion": 1.0}        # INDICATIVE
+    assert otp["dead_end"] is True

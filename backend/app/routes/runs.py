@@ -7,12 +7,15 @@ persistence (app.repository) is invoked best-effort and never blocks the respons
 """
 from __future__ import annotations
 
+import re
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app import orchestrator, repository
+from app.evidence.export import pack_to_json_bytes, pack_to_pdf_bytes
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -67,3 +70,36 @@ def get_run(run_id: str) -> dict:
     if pack is None:
         raise HTTPException(status_code=404, detail="run not found")
     return pack
+
+
+def _safe_slug(text: str) -> str:
+    """Filename-safe slug for the Content-Disposition download name."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "evidence"
+
+
+@router.get("/{run_id}/export")
+def export_run(run_id: str, format: str = "json") -> Response:
+    """Download the §13 evidence pack as a compliance artifact (FR-4.1).
+
+    `format=json` (canonical, machine-readable) or `format=pdf` (audit deliverable).
+    Renders the in-memory pack on demand; both share the two-stream layout (§16).
+    """
+    pack = _STORE.get(run_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    fmt = format.lower()
+    if fmt not in ("json", "pdf"):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'pdf'")
+
+    stem = f"inclusionscope_{_safe_slug(str(pack.get('app', 'app')))}_{run_id[:8]}"
+    if fmt == "pdf":
+        body, media = pack_to_pdf_bytes(pack), "application/pdf"
+    else:
+        body, media = pack_to_json_bytes(pack), "application/json"
+
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{fmt}"'},
+    )
