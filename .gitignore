@@ -23,6 +23,10 @@ playwright-report/
 test-results/
 /backend/.playwright/
 
+# LangGraph per-run checkpoint store (§8 run graph)
+checkpoints.sqlite
+*.sqlite
+
 # Artifacts
 /artifacts/
 *.pdf

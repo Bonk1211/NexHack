@@ -26,17 +26,22 @@ class StartRunRequest(BaseModel):
     persona_names: list[str]
     seed: int = 1337           # §16 deterministic runs
     mode: str = "sequential"   # §20: sequential for clean demo narration
+    run_id: str | None = None  # reuse to resume an interrupted run (§8 checkpoint)
 
 
 @router.post("")
 def start_run(req: StartRunRequest) -> dict:
+    # run_id doubles as the run graph's checkpointer thread_id. A client may pass an
+    # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
+    # (returns the existing pack), neither re-runs nor duplicates personas.
+    run_id = req.run_id or str(uuid.uuid4())
     pack = orchestrator.run_assessment(
         app_name=req.app_name,
         target_url=req.target_url,
         persona_names=req.persona_names,
         seed=req.seed,
+        run_id=run_id,
     )
-    run_id = str(uuid.uuid4())
     _STORE[run_id] = pack
 
     # Best-effort persistence — swallow DB errors so the demo path never breaks.

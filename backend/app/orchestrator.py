@@ -1,34 +1,21 @@
 """Run orchestrator (§8, §20, §21).
 
-Wires the already-built pieces into one end-to-end run: for each persona it
-launches the navigator (app.agents.navigator), feeds the captured signals into
-the pure scorer (app.scoring.engine), then assembles the §13 evidence pack
-(app.evidence.pack). Personas run SEQUENTIALLY (§20) so a demo can narrate each
-journey in turn and so per-persona RNG seeds stay reproducible.
+Thin shim over the top-level map-reduce run graph (app.agents.run_graph). The
+end-to-end wiring — fan out one persona subgraph per persona, score with the pure
+scorer, assemble the §13 evidence pack, fire alerts — now lives in the graph; this
+module preserves the historical `run_assessment` entry point and return shape so
+the route layer and tests are unaffected.
 
-This module is importable without any network/DB: persistence lives in
-app.repository and is invoked by the route layer, not here.
+Persistence still lives in app.repository and is invoked by the route layer, not
+here. The run graph checkpoints per persona (keyed by run_id) for crash-resume.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from app.agents.navigator import FlowStep
+from app.agents.run_graph import DEFAULT_FLOW, run_assessment as _run_assessment
 
-from app.agents.navigator import FlowStep, NavConfig, run_journey
-from app.evidence.pack import PersonaRunResult, build_pack
-from app.scoring.engine import score
-from app.scoring.personas import load_persona, thresholds_for
-
-# The demo fixture flow (§20, §22): enter the OTP (critical), then submit (critical).
-DEFAULT_FLOW: list[FlowStep] = [
-    FlowStep("otp", "fill", role="textbox", critical=True),
-    FlowStep("submit", "click", role="button", name="Submit", critical=True),
-]
-
-
-def _requires_labels(persona: dict, thresholds_block: dict) -> bool:
-    """Persona depends on labels/SR semantics (drives the nav agent's label check)."""
-    disabilities = persona.get("disabilities", [])
-    return ("low_vision" in disabilities) or bool(thresholds_block.get("require_labels"))
+# Re-exported for callers/tests that referenced the orchestrator's flow constant.
+__all__ = ["DEFAULT_FLOW", "FlowStep", "run_assessment"]
 
 
 def run_assessment(
@@ -38,47 +25,20 @@ def run_assessment(
     flow: list[FlowStep] | None = None,
     seed: int = 1337,
     artifact_root: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
-    """Run one assessment across personas, sequentially, and build the evidence pack.
+    """Run one assessment across personas and return the §13 evidence pack.
 
-    Returns the §13 pack dict with an extra `screenshots` key mapping each persona
-    to its per-step screenshot paths (None where no artifact_root was given).
+    Delegates to the run graph. Return shape is unchanged: the §13 pack dict plus a
+    `screenshots` key mapping each persona to its per-step screenshot paths, and a
+    `synthesis` block (once-per-run LLM reasoning, §15).
     """
-    flow = flow if flow is not None else DEFAULT_FLOW
-
-    runs: list[PersonaRunResult] = []
-    screenshots: dict[str, list[str | None]] = {}
-
-    for i, name in enumerate(persona_names):
-        persona = load_persona(name)
-        thresholds_block = persona.get("thresholds", {})
-        behavior_profile = persona.get("behavior_profile", {})
-
-        cfg = NavConfig(
-            target_url=target_url,
-            flow=flow,
-            behavior_profile=behavior_profile,
-            requires_labels=_requires_labels(persona, thresholds_block),
-            # Per-persona offset keeps personas distinct yet the whole run reproducible.
-            seed=seed + i,
-            artifact_dir=f"{artifact_root}/{name}" if artifact_root else None,
-        )
-
-        journey = run_journey(cfg)
-        thresholds = thresholds_for(persona)
-        result = score(journey.steps, thresholds)
-
-        runs.append(
-            PersonaRunResult(
-                persona=name,
-                steps=tuple(journey.steps),
-                thresholds=thresholds,
-                result=result,
-            )
-        )
-        screenshots[name] = journey.screenshots
-
-    run_at = datetime.now(timezone.utc).isoformat()
-    pack = build_pack(app_name, run_at, runs)
-    pack["screenshots"] = screenshots
-    return pack
+    return _run_assessment(
+        app_name=app_name,
+        target_url=target_url,
+        persona_names=persona_names,
+        flow=flow,
+        seed=seed,
+        artifact_root=artifact_root,
+        run_id=run_id,
+    )

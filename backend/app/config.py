@@ -11,15 +11,20 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_key: str = ""
 
-    # Model family is an OPEN DECISION (§25) — kept configurable, not locked in code.
-    llm_provider: str = "anthropic"
-    llm_model_step: str = "claude-haiku-4-5-20251001"
-    llm_model_synth: str = "claude-opus-4-8"
-    llm_api_key: str = ""
+    # Model family LOCKED to DeepSeek V4 (§25 resolved). Two-tier: cheap per-step
+    # vision (flash), larger once-per-run synthesis (pro). The client is DeepSeek-only
+    # by construction (app.agents.llm), so there is no provider switch to misconfigure.
+    llm_model_step: str = "deepseek-v4-flash"      # comprehend (per-step vision)
+    llm_model_synth: str = "deepseek-v4-pro"       # synthesize (once per run)
+    llm_api_key: str = ""                          # empty => deterministic offline fallback
+    llm_base_url: str = "https://api.deepseek.com"  # OpenAI-compatible endpoint
 
     run_seed: int = 1337
     wcag_version: str = "2.2"
     slack_webhook_url: str = ""
+
+    # Per-persona crash-resume checkpoint store (§8 run graph).
+    checkpoint_db: str = "checkpoints.sqlite"
 
 
 settings = Settings()
