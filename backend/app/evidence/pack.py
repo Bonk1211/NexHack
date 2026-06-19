@@ -115,6 +115,29 @@ def build_remediation(runs: list[PersonaRunResult]) -> list[dict]:
     return sorted(worst.values(), key=lambda x: _SEVERITY_RANK.get(x["severity"], 4))
 
 
+def _step_detail(s: StepSignals) -> dict:
+    """Per-step evidence row, two streams kept distinct (§16).
+
+    `wcag_conformance` is TRUSTED (axe-derived, reportable on its own);
+    `llm_judgment` is INDICATIVE (persona-simulation confusion). Never collapsed.
+    """
+    wcag = {sig.criterion: ("pass" if sig.passed else "fail") for sig in s.wcag}
+    return {
+        "step_idx": s.step_idx,
+        "step_key": s.step_key,
+        "critical": s.critical,
+        "dwell_s": s.dwell_s,
+        "retries": s.retries,
+        "backtracked": s.retries > 0,
+        "dead_end": s.dead_end,
+        "completed": s.completed,
+        "reading_grade": s.reading_grade,
+        "wcag_conformance": wcag,                                   # TRUSTED
+        "axe_violations": [c for c, v in wcag.items() if v == "fail"],
+        "llm_judgment": {"confusion": s.llm_confusion},             # INDICATIVE
+    }
+
+
 def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
     """Assemble the §13 evidence pack JSON from per-persona results.
 
@@ -138,6 +161,7 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
             "wcag_failures": [c for c, v in r.result.wcag_conformance.items() if v == "fail"],
             "behavioral_note": "indicative — persona-simulation signal",
             "inclusion_score": r.result.composite.inclusion_score,
+            "steps": [_step_detail(s) for s in r.steps],   # per-step trusted+indicative (§16)
         }
         for r in runs
     ]

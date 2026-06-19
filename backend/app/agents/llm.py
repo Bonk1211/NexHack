@@ -12,16 +12,20 @@ stays PURE deterministic compute elsewhere — never an LLM (§16). LLM output f
 only the INDICATIVE stream (`llm_confusion`) and the OUTPUT-side narrative; it
 never touches the trusted WCAG stream or the composite math (§16/§23 hard line).
 
+DeepSeek V4 specifics (verified against the live endpoint):
+  - Structured output uses `method="json_mode"`, NOT tool-calling/`strict` — the
+    V4 models run in thinking mode, which rejects `tool_choice`.
+  - The endpoint is TEXT-ONLY (rejects image content), so `comprehend` judges from
+    the accessibility tree as text, not the screenshot pixels. That is the right
+    signal anyway: the a11y tree is what a screen-reader / low-vision user perceives.
+
 Determinism (§16/§20): temperature=0, and — critically — when no API key is set
 every call DEGRADES to a deterministic offline path (heuristic confusion /
 templated synthesis) that reproduces the pre-LLM behavior exactly. That keeps
-tests network-free (§22) and the demo reproducible. DeepSeek-reasoner is NEVER
-used: it has no structured-output support.
+tests network-free (§22) and the demo reproducible.
 """
 from __future__ import annotations
 
-import base64
-import io
 import logging
 
 from pydantic import BaseModel, Field
@@ -73,10 +77,14 @@ def _client(model: str):
 
 _VISION_SYSTEM = (
     "You simulate a specific user persona attempting one step of a mobile app flow. "
-    "Looking at the screenshot and the accessibility tree, judge how confused this "
-    "persona would be about what to do. Return confusion 0.0 (obvious) to 1.0 "
-    "(cannot tell what the control wants). If the expected control was not locatable, "
-    "suggest its likely accessible name as fallback_target."
+    "From the accessibility tree and the step context, judge how confused this persona "
+    "would be about what to do — this is the experience of a screen-reader / low-vision "
+    "user, who perceives the page through its a11y semantics, not its pixels. "
+    "Respond ONLY with a JSON object of exactly this shape: "
+    '{"confusion": <float 0.0-1.0>, "reason": "<short phrase>", '
+    '"fallback_target": "<accessible name to try, or null>"}. '
+    "confusion 0.0 = obvious, 1.0 = cannot tell what the control wants. "
+    "Set fallback_target only when the expected control is not present in the tree."
 )
 
 
@@ -91,17 +99,6 @@ def _heuristic_confusion(*, action: str, requires_labels: bool, labeled: bool) -
     return 0.0
 
 
-def _downscale_b64(screenshot_path: str, max_px: int = 768) -> str:
-    """Downscale a PNG and return base64 (§ cost note: shrink before sending)."""
-    from PIL import Image
-
-    img = Image.open(screenshot_path)
-    img.thumbnail((max_px, max_px))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
 def vision_judge(
     screenshot_path: str | None,
     step_key: str,
@@ -112,6 +109,12 @@ def vision_judge(
     action: str,
 ) -> VisionJudgment:
     """The `comprehend` node's work: a per-step confusion judgment.
+
+    Judges from the ACCESSIBILITY TREE as text — the configured DeepSeek endpoint
+    is text-only (it rejects image content), and the a11y tree is precisely what a
+    screen-reader / low-vision user perceives, so this is the right signal for the
+    personas that matter. `screenshot_path` is retained for API stability and is
+    still captured for empathy replay; it is simply not sent to a text-only model.
 
     Offline (no key) or on any failure, returns the deterministic heuristic so a
     run never depends on the network (§16/§22).
@@ -124,24 +127,30 @@ def vision_judge(
         fallback_target=None,
     )
     client = _client(settings.llm_model_step)
-    if client is None or not screenshot_path:
+    if client is None or not aria_excerpt:
         return fallback
 
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        b64 = _downscale_b64(screenshot_path)
-        human = HumanMessage(content=[
-            {"type": "text", "text": f"Step '{step_key}'. Accessibility tree:\n{aria_excerpt[:1500]}"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-        ])
-        structured = client.with_structured_output(VisionJudgment, strict=True)
+        human = HumanMessage(content=(
+            f"Persona depends on labels/screen-reader semantics: {requires_labels}. "
+            f"Step '{step_key}', action '{action}'. "
+            f"Target control has an accessible name in the tree: {labeled}. "
+            f"Accessibility tree:\n{aria_excerpt[:2000]}\n"
+            "Judge this persona's confusion. Respond in JSON."
+        ))
+        # json_mode (NOT function_calling/strict): DeepSeek V4 runs in thinking mode,
+        # which rejects tool_choice ("Thinking mode does not support this tool_choice").
+        # json_mode uses response_format=json_object — no tool call — and parses into
+        # the schema; the prompt states the exact JSON shape json_mode needs.
+        structured = client.with_structured_output(VisionJudgment, method="json_mode")
         out = structured.invoke([SystemMessage(content=_VISION_SYSTEM), human])
         return out if isinstance(out, VisionJudgment) else fallback
     except Exception as exc:
         # Degrade to the heuristic, but LOG it — a bad/expired key or misconfigured
         # endpoint must not be silently indistinguishable from running offline.
-        logger.warning("vision_judge LLM call failed (%s: %s); using offline heuristic",
+        logger.warning("comprehend LLM call failed (%s: %s); using offline heuristic",
                        type(exc).__name__, exc)
         return fallback
 
@@ -152,7 +161,10 @@ _SYNTH_SYSTEM = (
     "You are an accessibility compliance analyst. Given an inclusion evidence pack "
     "(trusted WCAG conformance + indicative persona verdicts), write a short, "
     "audit-style synthesis. Lead with the single business line naming who is "
-    "silently excluded. Do not invent WCAG results; use only what is in the pack."
+    "silently excluded. Do not invent WCAG results; use only what is in the pack. "
+    "Respond ONLY with a JSON object of exactly this shape: "
+    '{"rollup": "<one business line>", "narrative": "<2-3 sentences>", '
+    '"key_exclusions": ["<persona (severity) at step>", ...]}.'
 )
 
 
@@ -196,7 +208,8 @@ def synthesize(pack: dict) -> SynthesisResult:
             "personas": pack.get("personas"),
             "remediation": pack.get("remediation"),
         })[:6000]
-        structured = client.with_structured_output(SynthesisResult, strict=True)
+        # json_mode, not tool-calling — DeepSeek V4 thinking mode rejects tool_choice.
+        structured = client.with_structured_output(SynthesisResult, method="json_mode")
         out = structured.invoke([
             SystemMessage(content=_SYNTH_SYSTEM),
             HumanMessage(content=compact),
