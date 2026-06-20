@@ -44,6 +44,7 @@ from app.agents.navigator import (
 from app.agents.signals import axe_to_wcag, reading_grade, run_axe
 from app.agents.state import PersonaInput, PersonaState
 from app.scoring.engine import StepSignals
+from app.llm_usage import current_tracker, set_tracker
 
 
 def _bp(state: PersonaState) -> dict:
@@ -327,8 +328,19 @@ def run_persona(payload: PersonaInput) -> PersonaState:
          to persist the subgraph's live `page` channel (not msgpack-serializable).
       2. Keeps sync Playwright off any asyncio loop, so it works under Send fan-out.
     """
+    tracker = current_tracker()
+
+    def _wrapped(p: PersonaInput):
+        if tracker is not None:
+            set_tracker(tracker)
+        try:
+            return _run_persona_sync(p)
+        finally:
+            if tracker is not None:
+                set_tracker(None)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        return ex.submit(_run_persona_sync, payload).result()
+        return ex.submit(_wrapped, payload).result()
 
 
 def run_journey(cfg: NavConfig) -> JourneyResult:

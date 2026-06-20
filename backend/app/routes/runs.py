@@ -29,10 +29,11 @@ from app.evidence.export import pack_to_json_bytes, pack_to_pdf_bytes
 from app.evidence.pack import PersonaRunResult, build_pack, build_replay
 from app.scoring.engine import score
 from app.scoring.personas import load_library, load_persona, thresholds_for
+from app.llm_usage import current_tracker, set_tracker, track_usage
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
-# In-memory store {run_id: pack}. Survives only for the process lifetime.
+# In-memory store {run_id: {pack, usage}}. Survives only for the process lifetime.
 _STORE: dict[str, dict] = {}
 
 # Local screenshot store, served as static files at /artifacts (see app.main).
@@ -82,30 +83,39 @@ def start_run(req: StartRunRequest) -> dict:
     # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
     # (returns the existing pack), neither re-runs nor duplicates personas.
     run_id = req.run_id or str(uuid.uuid4())
-    pack = orchestrator.run_assessment(
-        app_name=req.app_name,
-        target_url=req.target_url,
-        persona_names=req.persona_names,
-        seed=req.seed,
-        run_id=run_id,
-        artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
-    )
+    with track_usage() as tracker:
+        pack = orchestrator.run_assessment(
+            app_name=req.app_name,
+            target_url=req.target_url,
+            persona_names=req.persona_names,
+            seed=req.seed,
+            run_id=run_id,
+            artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
+        )
 
-    # Best-effort persistence — swallow DB errors so the demo path never breaks. When
-    # Supabase is configured this uploads screenshots and rewrites refs to Storage URLs.
-    try:
-        repository.persist_run(pack)
-    except Exception:
-        pass
+        # Best-effort persistence — swallow DB errors so the demo path never breaks.
+        try:
+            repository.persist_run(pack)
+        except Exception:
+            pass
 
-    # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
-    _serve_screenshots(pack)
-    _STORE[run_id] = pack
-    return {"run_id": run_id, "pack": pack}
+        # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
+        _serve_screenshots(pack)
+        usage = tracker.serialized()
+
+    _STORE[run_id] = {"pack": pack, "usage": usage}
+    return {"run_id": run_id, "pack": pack, "usage": usage}
 
 
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
+
+
+def _safe_enqueue(q: queue.Queue, item: dict) -> None:
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        pass
 
 
 def _step_status(step) -> str:
@@ -140,8 +150,12 @@ def stream_run(
     q: queue.Queue = queue.Queue(maxsize=48)
     SENTINEL = object()
 
+    tracker_cm = track_usage(on_update=lambda summary: _safe_enqueue(q, {"type": "usage", "summary": summary}))
+    tracker = tracker_cm.__enter__()
+
     def worker():
         try:
+            set_tracker(tracker)
             q.put({"type": "node", "scope": "run", "node": "init", "personas": names})
             results: list[PersonaRunResult] = []
             shots_map: dict[str, list] = {}
@@ -245,23 +259,29 @@ def stream_run(
             except Exception:
                 pass
             _serve_screenshots(pack)
-            _STORE[rid] = pack
             q.put({"type": "node", "scope": "run", "node": "alerts",
                    "output": {"p0_alerts": len([p for p in pack["personas"]
                                                 if p.get("severity") == "P0"])}})
-            q.put({"type": "final", "run_id": rid, "pack": pack})
+            usage = tracker.serialized()
+            _STORE[rid] = {"pack": pack, "usage": usage}
+            _safe_enqueue(q, {"type": "usage", "summary": usage})
+            q.put({"type": "final", "run_id": rid, "pack": pack, "usage": usage})
         except Exception as exc:  # noqa: BLE001 — surface any failure to the client
             q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
+            set_tracker(None)
             q.put(SENTINEL)
 
     def gen():
         threading.Thread(target=worker, daemon=True).start()
-        while True:
-            item = q.get()
-            if item is SENTINEL:
-                break
-            yield _sse(item)
+        try:
+            while True:
+                item = q.get()
+                if item is SENTINEL:
+                    break
+                yield _sse(item)
+        finally:
+            tracker_cm.__exit__(None, None, None)
 
     return StreamingResponse(
         gen(),
@@ -289,18 +309,27 @@ def list_personas() -> list[dict]:
 
 @router.get("")
 def list_runs() -> list[dict]:
-    return [
-        {"run_id": rid, "app": pack.get("app"), "inclusion_score": pack.get("inclusion_score")}
-        for rid, pack in _STORE.items()
-    ]
+    response = []
+    for rid, payload in _STORE.items():
+        pack = payload.get("pack") if isinstance(payload, dict) and "pack" in payload else payload
+        if not isinstance(pack, dict):
+            continue
+        response.append({
+            "run_id": rid,
+            "app": pack.get("app"),
+            "inclusion_score": pack.get("inclusion_score"),
+        })
+    return response
 
 
 @router.get("/{run_id}")
 def get_run(run_id: str) -> dict:
-    pack = _STORE.get(run_id)
-    if pack is None:
+    payload = _STORE.get(run_id)
+    if payload is None:
         raise HTTPException(status_code=404, detail="run not found")
-    return pack
+    if isinstance(payload, dict) and "pack" in payload:
+        return {"pack": payload["pack"], "usage": payload.get("usage")}
+    return payload
 
 
 def _safe_slug(text: str) -> str:
@@ -315,9 +344,13 @@ def export_run(run_id: str, format: str = "json") -> Response:
     `format=json` (canonical, machine-readable) or `format=pdf` (audit deliverable).
     Renders the in-memory pack on demand; both share the two-stream layout (§16).
     """
-    pack = _STORE.get(run_id)
-    if pack is None:
+    payload = _STORE.get(run_id)
+    if payload is None:
         raise HTTPException(status_code=404, detail="run not found")
+    if isinstance(payload, dict) and "pack" in payload:
+        pack = payload["pack"]
+    else:
+        pack = payload
 
     fmt = format.lower()
     if fmt not in ("json", "pdf"):

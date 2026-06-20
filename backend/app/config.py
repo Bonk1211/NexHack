@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     llm_model_synth: str = "deepseek-v4-pro"       # synthesize (once per run)
     llm_api_key: str = ""                          # empty => deterministic offline fallback
     llm_base_url: str = "https://api.deepseek.com"  # OpenAI-compatible endpoint
+    llm_pricing: str = (
+        '{"deepseek-v4-flash":{"prompt":0.00014,"completion":0.00028},'
+        '"deepseek-v4-pro":{"prompt":0.00174,"completion":0.00348}}'
+    )
+    # Source: DeepSeek V4 pricing (Apidog, Apr 24 2026) — USD per 1K tokens
+    llm_pricing_currency: str = "USD"
 
     run_seed: int = 1337
     wcag_version: str = "2.2"

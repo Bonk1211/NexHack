@@ -32,7 +32,7 @@ _PACK = {
 
 
 def _seed(run_id="run-export-1"):
-    runs._STORE[run_id] = _PACK
+    runs._STORE[run_id] = {"pack": _PACK, "usage": None}
     return run_id
 
 

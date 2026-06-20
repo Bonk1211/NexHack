@@ -9,6 +9,7 @@ import {
   type Pack,
   type ReplayFrame,
   type StreamEvent,
+  type UsageSummary,
 } from "@/lib/live";
 
 const DEFAULT_TARGET = "http://localhost:8000/fixture/index.html";
@@ -114,6 +115,7 @@ export default function AssessmentRunner({
   const [pack, setPack] = useState<Pack | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -131,11 +133,17 @@ export default function AssessmentRunner({
     setError(null);
     setPack(null);
     setLive({ runNodes: [], log: [], n: 1 });
+    setUsage(null);
     esRef.current?.close();
     esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected }, (e) => {
+      if (e.type === "usage") {
+        setUsage(e.summary);
+        return;
+      }
       if (e.type === "final") {
         setPack(e.pack);
         setRunId(e.run_id);
+        if (e.usage) setUsage(e.usage);
         setLive(null);
         setLoading(false);
         esRef.current?.close();
@@ -143,6 +151,7 @@ export default function AssessmentRunner({
       }
       if (e.type === "error") {
         setError(e.message);
+        setUsage(null);
         setLoading(false);
         esRef.current?.close();
         return;
@@ -205,10 +214,11 @@ export default function AssessmentRunner({
           {loading ? "Running agents — streaming nodes…" : "Run assessment"}
         </button>
         {error && <p className="mt-3 text-[13px] text-blocked">{error}</p>}
+        {usage && <UsageTicker usage={usage} live={!!live} />}
       </section>
 
       {live && <LiveView live={live} />}
-      {pack && <Results pack={pack} runId={runId} />}
+      {pack && <Results pack={pack} runId={runId} usage={usage} />}
     </div>
   );
 }
@@ -229,6 +239,83 @@ function fmtVal(v: unknown): string {
   if (typeof v === "boolean") return v ? "yes" : "no";
   if (Array.isArray(v)) return v.length ? v.join(", ") : "none";
   return String(v);
+}
+
+function formatTokens(n: number): string {
+  return new Intl.NumberFormat("en-US").format(n);
+}
+
+function formatCost(amount: number, currency: string): string {
+  if (amount === 0) return `${currency} 0.0000`;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 6,
+    }).format(amount);
+  } catch {
+    return `$${amount.toFixed(4)}`;
+  }
+}
+
+function UsageDetails({ usage, title, dense = false }: { usage: UsageSummary; title: string; dense?: boolean }) {
+  const headingClass = dense ? "text-[13px] text-primary" : "text-[16px] text-primary";
+  const totalClass = dense ? "font-mono text-[12px] text-anchor" : "font-mono text-[13px] text-anchor";
+  const statsClass = dense ? "text-[11px] text-secondary" : "text-[12px] text-secondary";
+  const legendClass = dense ? "text-[11px] text-tertiary" : "text-[12px] text-tertiary";
+  const modelClass = dense ? "text-[11px] text-secondary" : "text-[12px] text-secondary";
+
+  const prompt = formatTokens(usage.total_prompt_tokens);
+  const completion = formatTokens(usage.total_completion_tokens);
+  const tokens = formatTokens(usage.total_tokens);
+  const costLine = usage.pricing_applied
+    ? `Estimated cost ${formatCost(usage.total_cost, usage.currency)}`
+    : "Set LLM_PRICING in the backend to unlock cost estimates.";
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <span className={headingClass}>{title}</span>
+        <span className={totalClass}>{tokens} tok</span>
+      </div>
+      <div className={statsClass}>
+        {prompt} prompt · {completion} completion
+      </div>
+      <div className={legendClass}>{costLine}</div>
+      {usage.models.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {usage.models.map((m) => (
+            <li key={m.model} className="flex items-baseline justify-between">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">{m.model}</span>
+              <span className={`${modelClass} font-mono`}>
+                {formatTokens(m.total_tokens)} tok
+                {usage.pricing_applied && m.pricing_applied
+                  ? ` · ${formatCost(m.cost, usage.currency)}`
+                  : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function UsageTicker({ usage, live }: { usage: UsageSummary; live: boolean }) {
+  return (
+    <div className="mt-4 rounded-xl bg-field/60 p-3 shadow-inner">
+      <UsageDetails usage={usage} title={live ? "Live token usage" : "Token usage"} dense />
+    </div>
+  );
+}
+
+function UsageCard({ usage }: { usage: UsageSummary }) {
+  return (
+    <div className="rounded-card bg-card p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+      <UsageDetails usage={usage} title="Token usage" />
+    </div>
+  );
 }
 
 function NodeOutputCard({ item }: { item: NodeCardItem }) {
@@ -341,7 +428,7 @@ function LiveView({ live }: { live: LiveState }) {
   );
 }
 
-function Results({ pack, runId }: { pack: Pack; runId: string | null }) {
+function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
   return (
     <section className="mt-8 space-y-8">
       {/* Score + synthesis */}
@@ -357,6 +444,13 @@ function Results({ pack, runId }: { pack: Pack; runId: string | null }) {
           <p className="mt-1 text-[13px] text-secondary">{pack.synthesis.narrative}</p>
         )}
       </div>
+
+      {usage && (
+        <div>
+          <h2 className="section-label mb-2">Token usage</h2>
+          <UsageCard usage={usage} />
+        </div>
+      )}
 
       {/* Persona verdicts */}
       <div className="grid gap-3 sm:grid-cols-3">

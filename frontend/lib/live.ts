@@ -62,6 +62,26 @@ export interface Pack {
 export interface RunResponse {
   run_id: string;
   pack: Pack;
+  usage?: UsageSummary;
+}
+
+export interface UsageModelBreakdown {
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost: number;
+  pricing_applied: boolean;
+}
+
+export interface UsageSummary {
+  currency: string;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+  pricing_applied: boolean;
+  models: UsageModelBreakdown[];
 }
 
 export async function getPersonas(): Promise<PersonaOption[]> {
@@ -118,7 +138,8 @@ export type StreamEvent =
     }
   | { type: "persona_done"; persona: string; verdict: string; severity: string | null; blocked_at: string | null }
   | { type: "frame"; persona: string; data: string } // base64 JPEG of the live browser
-  | { type: "final"; run_id: string; pack: Pack }
+  | { type: "usage"; summary: UsageSummary }
+  | { type: "final"; run_id: string; pack: Pack; usage?: UsageSummary }
   | { type: "error"; message: string };
 
 /** Open an SSE run; calls onEvent for each event. Returns the EventSource (caller closes it). */

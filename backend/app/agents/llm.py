@@ -26,11 +26,13 @@ tests network-free (§22) and the demo reproducible.
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.llm_usage import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,22 @@ def _heuristic_confusion(*, action: str, requires_labels: bool, labeled: bool) -
     return 0.0
 
 
+def _extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for chunk in content:
+            if isinstance(chunk, dict):
+                text = chunk.get("text")
+                if text:
+                    parts.append(str(text))
+            else:
+                parts.append(str(chunk))
+        return "".join(parts)
+    return str(content)
+
+
 def vision_judge(
     screenshot_path: str | None,
     step_key: str,
@@ -140,13 +158,18 @@ def vision_judge(
             f"Accessibility tree:\n{aria_excerpt[:2000]}\n"
             "Judge this persona's confusion. Respond in JSON."
         ))
-        # json_mode (NOT function_calling/strict): DeepSeek V4 runs in thinking mode,
-        # which rejects tool_choice ("Thinking mode does not support this tool_choice").
-        # json_mode uses response_format=json_object — no tool call — and parses into
-        # the schema; the prompt states the exact JSON shape json_mode needs.
-        structured = client.with_structured_output(VisionJudgment, method="json_mode")
-        out = structured.invoke([SystemMessage(content=_VISION_SYSTEM), human])
-        return out if isinstance(out, VisionJudgment) else fallback
+        ai = client.invoke(
+            [SystemMessage(content=_VISION_SYSTEM), human],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(model_name or settings.llm_model_step, prompt_tokens, completion_tokens)
+
+        payload = json.loads(_extract_text(ai.content))
+        return VisionJudgment.model_validate(payload)
     except Exception as exc:
         # Degrade to the heuristic, but LOG it — a bad/expired key or misconfigured
         # endpoint must not be silently indistinguishable from running offline.
@@ -197,8 +220,6 @@ def synthesize(pack: dict) -> SynthesisResult:
     if client is None:
         return fallback
     try:
-        import json
-
         from langchain_core.messages import HumanMessage, SystemMessage
 
         compact = json.dumps({
@@ -208,13 +229,21 @@ def synthesize(pack: dict) -> SynthesisResult:
             "personas": pack.get("personas"),
             "remediation": pack.get("remediation"),
         })[:6000]
-        # json_mode, not tool-calling — DeepSeek V4 thinking mode rejects tool_choice.
-        structured = client.with_structured_output(SynthesisResult, method="json_mode")
-        out = structured.invoke([
-            SystemMessage(content=_SYNTH_SYSTEM),
-            HumanMessage(content=compact),
-        ])
-        return out if isinstance(out, SynthesisResult) else fallback
+        ai = client.invoke(
+            [
+                SystemMessage(content=_SYNTH_SYSTEM),
+                HumanMessage(content=compact),
+            ],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(model_name or settings.llm_model_synth, prompt_tokens, completion_tokens)
+
+        payload = json.loads(_extract_text(ai.content))
+        return SynthesisResult.model_validate(payload)
     except Exception as exc:
         logger.warning("synthesize LLM call failed (%s: %s); using template synthesis",
                        type(exc).__name__, exc)
