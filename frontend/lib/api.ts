@@ -47,19 +47,78 @@ function uid(prefix: string) {
 
 // ── Projects ──────────────────────────────────────────────────
 export async function getProjects(): Promise<Project[]> {
+  try {
+    const res = await fetch(`${BASE_URL}/runs/apps`);
+    if (res.ok) return res.json();
+  } catch {}
   await delay();
   return db.projects.map((p) => ({ ...p }));
+}
+
+export async function getApp(appId: string): Promise<Project> {
+  try {
+    const res = await fetch(`${BASE_URL}/runs/apps/${appId}`);
+    if (res.ok) return res.json();
+  } catch {}
+  await delay();
+  const p = db.projects.find((x) => x.id === appId);
+  if (!p) throw new Error(`Project ${appId} not found`);
+  return { ...p };
+}
+
+export async function createApp(input: { name: string; stagingUrl?: string; repoUrl?: string }): Promise<Project> {
+  const res = await fetch(`${BASE_URL}/runs/apps`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(`POST /runs/apps failed: ${res.status}`);
+  return res.json();
+}
+
+export async function linkPersonaToApp(appId: string, personaId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/personas`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ personaId }),
+  });
+  if (!res.ok) throw new Error(`POST /runs/apps/${appId}/personas failed: ${res.status}`);
+}
+
+export async function unlinkPersonaFromApp(appId: string, personaId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/personas/${personaId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`DELETE /runs/apps/${appId}/personas/${personaId} failed: ${res.status}`);
+}
+
+export async function getLinkedPersonas(appId: string): Promise<string[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/personas`);
+  if (!res.ok) throw new Error(`GET /runs/apps/${appId}/personas failed: ${res.status}`);
+  return res.json();
 }
 
 export async function createProject(input: {
   name: string;
   description?: string;
+  repoUrl?: string;
+  stagingUrl?: string;
 }): Promise<Project> {
+  try {
+    const res = await fetch(`${BASE_URL}/runs/apps`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: input.name, stagingUrl: input.stagingUrl, repoUrl: input.repoUrl }),
+    });
+    if (res.ok) return res.json();
+  } catch {}
   await delay();
   const p: Project = {
     id: uid("proj"),
     name: input.name,
     description: input.description,
+    repoUrl: input.repoUrl,
+    stagingUrl: input.stagingUrl,
     personaCount: 0,
   };
   db.projects.push(p);
@@ -67,6 +126,73 @@ export async function createProject(input: {
 }
 
 export async function getProject(id: string): Promise<ProjectDetail> {
+  try {
+    const app = await getApp(id);
+    const { listRuns, getRunPack } = await import("./live");
+    const runHistory = await listRuns(app.name);
+    let latestRun: RunDetail | undefined;
+    if (runHistory.length > 0) {
+      const latestRunId = runHistory[0].id;
+      const { pack } = await getRunPack(latestRunId);
+      latestRun = {
+        id: latestRunId,
+        projectId: id,
+        mode: "sequential" as const,
+        status: "completed" as const,
+        createdAt: runHistory[0].created_at,
+        overallScore: pack.inclusion_score,
+        personaResults: pack.personas.map((p) => ({
+          personaId: p.persona,
+          persona: {
+            id: p.persona,
+            identity: {
+              name: p.persona,
+              label: "",
+              ageBand: "",
+              language: "",
+              techSavviness: 0.5,
+              disabilities: p.wcag_failures,
+            },
+            behavior: {
+              dwellMultiplier: 1,
+              giveupThresholdS: 60,
+              misinterpretProb: 0,
+            },
+            figurineStatus: "none" as const,
+          },
+          confusionScore: 1 - p.inclusion_score,
+          status: p.verdict === "completed" ? "ok" as const : p.verdict === "blocked" ? "blocked" as const : "friction" as const,
+          blockedAt: p.blocked_at || undefined,
+          completed: p.verdict === "completed",
+          steps: (p.steps || []).map((s: any) => ({
+            stepName: s.step_key,
+            status: s.completed ? "ok" as const : s.dead_end ? "blocked" as const : "friction" as const,
+            dwellMs: (s.dwell_s || 0) * 1000,
+            innerMonologue: "",
+            confusionLevel: s.llm_judgment?.confusion || 0,
+            understandability: 1 - (s.llm_judgment?.confusion || 0),
+          })),
+        })),
+        frictionMatrix: {
+          steps: pack.matrix.steps,
+          rows: Object.entries(pack.matrix.rows).map(([personaId, cells]) => ({
+            personaId,
+            cells: pack.matrix.steps.map((step) => {
+              const cell = cells[step];
+              return {
+                stepName: step,
+                status: cell.status === "green" ? "ok" as const : cell.status === "amber" ? "friction" as const : cell.status === "red" ? "blocked" as const : "ok" as const,
+                dwellMs: cell.dwell_s ? cell.dwell_s * 1000 : 0,
+              };
+            }),
+          })),
+        },
+      };
+    }
+    await delay();
+    const projectRepos = db.repos.filter((r) => r.projectId === id);
+    return { ...app, repos: projectRepos.map((r) => ({ ...r })), latestRun };
+  } catch {}
   await delay();
   const p = db.projects.find((x) => x.id === id);
   if (!p) throw new Error(`Project ${id} not found`);
@@ -85,7 +211,7 @@ export async function deleteProject(id: string): Promise<void> {
 // ── Repos ─────────────────────────────────────────────────────
 export async function createRepo(
   projectId: string,
-  input: { name: string; stagingUrl: string; viewport: Viewport },
+  input: { name: string; stagingUrl: string; repoUrl?: string; viewport: Viewport },
 ): Promise<Repo> {
   await delay();
   const r: Repo = {
@@ -93,6 +219,7 @@ export async function createRepo(
     projectId,
     name: input.name,
     stagingUrl: input.stagingUrl,
+    repoUrl: input.repoUrl,
     viewport: input.viewport,
     personaIds: [],
   };

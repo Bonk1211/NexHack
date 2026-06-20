@@ -9,8 +9,9 @@ import {
   getPersonas,
   getProjectDashboard,
   startRun,
-  linkPersona,
-  unlinkPersona,
+  linkPersonaToApp,
+  unlinkPersonaFromApp,
+  getLinkedPersonas,
 } from "@/lib/api";
 import { listRuns, type RunHistoryItem } from "@/lib/live";
 import type {
@@ -39,6 +40,7 @@ import { FrictionMatrix } from "@/components/FrictionMatrix";
 import AssessmentRunner from "@/components/AssessmentRunner";
 import { RunLog } from "@/components/RunLog";
 import { StatusDot } from "@/components/StatusDot";
+import { PhonePreview } from "@/components/PhonePreview";
 
 type Tab = "overview" | "dashboard" | "personas" | "runs";
 
@@ -51,6 +53,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [allPersonas, setAllPersonas] = useState<Persona[]>([]);
+  const [linkedPersonaIds, setLinkedPersonaIds] = useState<string[]>([]);
   const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [runMode, setRunMode] = useState<RunMode>("sequential");
@@ -76,9 +79,11 @@ export default function ProjectDetailPage() {
       getProjectRuns(projectId),
       getPersonas(),
       getProjectDashboard(projectId),
-    ]).then(async ([p, r, personas, dash]) => {
+      getLinkedPersonas(projectId),
+    ]).then(async ([p, r, personas, dash, linkedIds]) => {
       setProject(p);
       setAllPersonas(personas);
+      setLinkedPersonaIds(linkedIds);
       setDashboard(dash);
       fixtureRunsRef.current = r;
       await loadRuns(p.name, r);
@@ -116,12 +121,7 @@ export default function ProjectDetailPage() {
     );
   }
 
-  const linkedPersonaIds = project.repos.flatMap((r) => r.personaIds);
   const linkedPersonas = allPersonas.filter((p) => linkedPersonaIds.includes(p.id));
-  const personaNames: Record<string, string> = {};
-  allPersonas.forEach((p) => {
-    personaNames[p.id] = p.identity.name;
-  });
 
   return (
     <div>
@@ -186,7 +186,7 @@ export default function ProjectDetailPage() {
 
       <div className="px-10 py-8">
         {tab === "overview" && (
-          <OverviewTab project={project} personaNames={personaNames} />
+          <OverviewTab project={project} runs={runs} />
         )}
         {tab === "dashboard" && (
           <DashboardTab dashboard={dashboard} projectId={projectId} />
@@ -195,9 +195,14 @@ export default function ProjectDetailPage() {
           <PersonasTab
             linkedPersonas={linkedPersonas}
             allPersonas={allPersonas}
-            repoId={project.repos[0]?.id}
-            onRefresh={() => {
-              getProject(projectId).then(setProject);
+            appId={projectId}
+            onRefresh={async () => {
+              const [p, linkedIds] = await Promise.all([
+                getProject(projectId),
+                getLinkedPersonas(projectId),
+              ]);
+              setProject(p);
+              setLinkedPersonaIds(linkedIds);
             }}
           />
         )}
@@ -221,53 +226,164 @@ export default function ProjectDetailPage() {
 
 function OverviewTab({
   project,
-  personaNames,
+  runs,
 }: {
   project: ProjectDetail;
-  personaNames: Record<string, string>;
+  runs: RunSummary[];
 }) {
-  const run = project.latestRun;
-  if (!run) {
-    return (
-      <div className="py-12 text-center text-secondary">
-        No runs yet. Start an acceptance test to see results here.
-      </div>
-    );
-  }
+  const [latestCommit, setLatestCommit] = useState<{
+    message: string;
+    author: string;
+    date: string;
+    sha: string;
+  } | null>(null);
 
-  const blockedPersonas = run.personaResults.filter((p) => p.status === "blocked");
-  const atRiskNames = blockedPersonas.map((p) => p.persona.identity.name).join(", ");
+  useEffect(() => {
+    if (!project.repoUrl) return;
+    const match = project.repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    if (!match) return;
+    const [, owner, repo] = match;
+    fetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`)
+      .then((res) => res.json())
+      .then((commits) => {
+        if (commits.length > 0) {
+          const c = commits[0];
+          setLatestCommit({
+            message: c.commit.message.split("\n")[0],
+            author: c.commit.author.name,
+            date: c.commit.author.date,
+            sha: c.sha.slice(0, 7),
+          });
+        }
+      })
+      .catch(() => {});
+  }, [project.repoUrl]);
+
+  const latestRun = runs[0];
+  const prevRun = runs[1];
+  const trend = latestRun && prevRun ? latestRun.overallScore - prevRun.overallScore : null;
 
   return (
-    <div>
-      <div className="rise rounded-[20px] bg-anchor p-10">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-on-dark-dim">
-              InclusionScope
+    <div className="grid grid-cols-[1fr_auto] gap-6">
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-6">
+          <div className="card p-6">
+            <h3 className="section-label mb-4">Project</h3>
+            <div className="space-y-3">
+              <div>
+                <div className="text-[12px] text-tertiary">Name</div>
+                <div className="text-[15px] font-medium text-primary">{project.name}</div>
+              </div>
+              {project.description && (
+                <div>
+                  <div className="text-[12px] text-tertiary">Description</div>
+                  <div className="text-[14px] text-secondary">{project.description}</div>
+                </div>
+              )}
+              {project.repoUrl && (
+                <div>
+                  <div className="text-[12px] text-tertiary">Repository</div>
+                  <a
+                    href={project.repoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[14px] text-brand hover:underline"
+                  >
+                    {project.repoUrl.replace("https://github.com/", "")}
+                  </a>
+                </div>
+              )}
+              {project.stagingUrl && (
+                <div>
+                  <div className="text-[12px] text-tertiary">Staging</div>
+                  <a
+                    href={project.stagingUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[14px] text-brand hover:underline"
+                  >
+                    {project.stagingUrl}
+                  </a>
+                </div>
+              )}
             </div>
-            <h2 className="mt-2 font-display text-[28px] text-on-dark">
-              {project.name} (staging)
-            </h2>
-            <p className="mt-1 text-[14px] text-on-dark-dim">
-              {run.personaResults.length} personas
-            </p>
-            {atRiskNames && (
-              <p className="mt-3 text-[14px] text-on-dark-dim">
-                At risk:{" "}
-                <span className="font-medium text-[#ff6b60]">{atRiskNames}</span>
-              </p>
-            )}
           </div>
-          <ScoreRing value={run.overallScore} size={132} />
+
+          <div className="card p-6">
+            <h3 className="section-label mb-4">Health</h3>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[12px] text-tertiary">Latest score</div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="text-[32px] font-semibold tabular-nums text-primary">
+                    {latestRun ? scorePct(latestRun.overallScore) : "—"}
+                  </span>
+                  {trend !== null && (
+                    <span className={`text-[14px] font-medium ${trend > 0 ? "text-ok" : trend < 0 ? "text-blocked" : "text-tertiary"}`}>
+                      {trend > 0 ? "▲" : trend < 0 ? "▼" : "—"} {Math.abs(Math.round(trend * 100))}%
+                    </span>
+                  )}
+                </div>
+              </div>
+              {latestRun && <ScoreRing value={latestRun.overallScore} size={80} />}
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-4">
+              <div>
+                <div className="text-[12px] text-tertiary">Total runs</div>
+                <div className="text-[20px] font-semibold tabular-nums text-primary">{runs.length}</div>
+              </div>
+              <div>
+                <div className="text-[12px] text-tertiary">Last run</div>
+                <div className="text-[14px] text-secondary">{latestRun ? relativeTime(latestRun.createdAt) : "—"}</div>
+              </div>
+            </div>
+          </div>
         </div>
+
+        {latestCommit && (
+          <div className="card p-6">
+            <h3 className="section-label mb-4">Latest commit</h3>
+            <div className="flex items-start gap-3">
+              <div className="mt-1 h-8 w-8 shrink-0 rounded-full bg-field" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[14px] font-medium text-primary">{latestCommit.message}</div>
+                <div className="mt-1 flex items-center gap-3 text-[12px] text-tertiary">
+                  <span>{latestCommit.author}</span>
+                  <span>•</span>
+                  <span>{relativeTime(latestCommit.date)}</span>
+                  <span>•</span>
+                  <code className="rounded bg-field px-1.5 py-0.5 text-[11px]">{latestCommit.sha}</code>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {runs.length > 0 && (
+          <div className="card p-6">
+            <div className="flex items-center justify-between">
+              <h3 className="section-label">Quick actions</h3>
+            </div>
+            <div className="mt-4 flex gap-3">
+              <Link
+                href={`/projects/${project.id}/runs/${latestRun?.id}`}
+                className="rounded-lg bg-field px-4 py-2 text-[13px] font-medium text-primary no-underline transition-colors hover:bg-field/80"
+              >
+                View latest run
+              </Link>
+            </div>
+          </div>
+        )}
       </div>
 
-      <PersonaWall results={run.personaResults} />
-
-      <FrictionMatrix matrix={run.frictionMatrix} personaNames={personaNames} />
-
-      <RunLog results={run.personaResults} />
+      {project.stagingUrl && (
+        <div className="card p-6">
+          <h3 className="section-label mb-4">Preview</h3>
+          <div className="flex justify-center">
+            <PhonePreview url={project.stagingUrl} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -275,19 +391,18 @@ function OverviewTab({
 function PersonasTab({
   linkedPersonas,
   allPersonas,
-  repoId,
+  appId,
   onRefresh,
 }: {
   linkedPersonas: Persona[];
   allPersonas: Persona[];
-  repoId?: string;
+  appId: string;
   onRefresh: () => void;
 }) {
   const [showModal, setShowModal] = useState(false);
 
   async function handleUnlink(personaId: string) {
-    if (!repoId) return;
-    await unlinkPersona(repoId, personaId);
+    await unlinkPersonaFromApp(appId, personaId);
     onRefresh();
   }
 
@@ -337,7 +452,7 @@ function PersonasTab({
         <AddPersonaModal
           allPersonas={allPersonas}
           linkedIds={linkedPersonas.map((p) => p.id)}
-          repoId={repoId}
+          appId={appId}
           onClose={() => setShowModal(false)}
           onAdded={() => {
             setShowModal(false);
@@ -352,13 +467,13 @@ function PersonasTab({
 function AddPersonaModal({
   allPersonas,
   linkedIds,
-  repoId,
+  appId,
   onClose,
   onAdded,
 }: {
   allPersonas: Persona[];
   linkedIds: string[];
-  repoId?: string;
+  appId: string;
   onClose: () => void;
   onAdded: () => void;
 }) {
@@ -374,10 +489,9 @@ function AddPersonaModal({
   }
 
   async function handleAdd() {
-    if (!repoId) return;
     setSaving(true);
     for (const id of selected) {
-      await linkPersona(repoId, id);
+      await linkPersonaToApp(appId, id);
     }
     onAdded();
   }

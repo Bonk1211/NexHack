@@ -6,6 +6,7 @@ import { getProjects, createProject, createRepo } from "@/lib/api";
 import type { Project, Viewport } from "@/lib/types";
 import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
+import { PhonePreview } from "@/components/PhonePreview";
 
 export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -44,15 +45,15 @@ export default function Home() {
 
       <div className="px-10 py-10">
         {loading ? (
-          <div className="grid grid-cols-3 gap-5">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="card h-[140px] shimmer" />
+          <div className="grid grid-cols-2 gap-5">
+            {[0, 1].map((i) => (
+              <div key={i} className="card h-[260px] shimmer" />
             ))}
           </div>
         ) : projects.length === 0 ? (
           <EmptyState onNew={() => setShowNew(true)} />
         ) : (
-          <div className="grid grid-cols-3 gap-5">
+          <div className="grid grid-cols-2 gap-5">
             {projects.map((p, i) => (
               <div key={p.id} className="rise" style={{ animationDelay: `${i * 30}ms` }}>
                 <ProjectCard project={p} />
@@ -77,25 +78,60 @@ export default function Home() {
 
 function ProjectCard({ project }: { project: Project }) {
   return (
-    <Link
-      href={`/projects/${project.id}`}
-      className="card group block p-6 no-underline transition-all duration-200 ease-out hover:-translate-y-0.5"
-    >
-      <div className="flex items-start justify-between">
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-[20px] text-primary">{project.name}</h3>
+    <div className="card group flex gap-5 p-6 transition-all duration-200 ease-out">
+      <PhonePreview url={project.stagingUrl} />
+      <div className="flex min-w-0 flex-1 flex-col justify-between">
+        <div>
+          <Link
+            href={`/projects/${project.id}`}
+            className="font-display text-[20px] text-primary no-underline hover:underline"
+          >
+            {project.name}
+          </Link>
           <p className="mt-1 text-[13px] text-secondary">
             {project.personaCount} persona{project.personaCount !== 1 ? "s" : ""}
           </p>
         </div>
-        {project.latestScore != null && (
-          <ScoreRing value={project.latestScore} size={56} />
-        )}
+        <div className="flex items-center justify-between">
+          <div className="flex gap-2">
+            {project.repoUrl && (
+              <a
+                href={project.repoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
+              >
+                <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                </svg>
+                Repo
+              </a>
+            )}
+            {project.stagingUrl && (
+              <a
+                href={project.stagingUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+                Live
+              </a>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {project.latestScore != null && (
+              <ScoreRing value={project.latestScore} size={48} />
+            )}
+          </div>
+        </div>
+        <div className="mt-2 text-[12px] text-tertiary">
+          {relativeTime(project.lastRunAt)}
+        </div>
       </div>
-      <div className="mt-4 text-[12px] text-tertiary">
-        {relativeTime(project.lastRunAt)}
-      </div>
-    </Link>
+    </div>
   );
 }
 
@@ -130,6 +166,7 @@ function NewProjectSlideOver({
   const [description, setDescription] = useState("");
   const [repoName, setRepoName] = useState("");
   const [stagingUrl, setStagingUrl] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
   const [viewport, setViewport] = useState<Viewport>("desktop");
   const [saving, setSaving] = useState(false);
 
@@ -137,9 +174,19 @@ function NewProjectSlideOver({
     e.preventDefault();
     if (!name.trim()) return;
     setSaving(true);
-    const p = await createProject({ name: name.trim(), description: description.trim() || undefined });
+    const p = await createProject({
+      name: name.trim(),
+      description: description.trim() || undefined,
+      repoUrl: repoUrl.trim() || undefined,
+      stagingUrl: stagingUrl.trim() || undefined,
+    });
     if (repoName.trim() && stagingUrl.trim()) {
-      await createRepo(p.id, { name: repoName.trim(), stagingUrl: stagingUrl.trim(), viewport });
+      await createRepo(p.id, {
+        name: repoName.trim(),
+        stagingUrl: stagingUrl.trim(),
+        repoUrl: repoUrl.trim() || undefined,
+        viewport,
+      });
     }
     onCreated(p);
   }
@@ -190,6 +237,15 @@ function NewProjectSlideOver({
                 onChange={(e) => setRepoName(e.target.value)}
                 className="input"
                 placeholder="mydigital-web (staging)"
+              />
+            </Field>
+            <Field label="Repository URL">
+              <input
+                type="url"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                className="input"
+                placeholder="https://github.com/org/repo"
               />
             </Field>
             <Field label="Staging URL">

@@ -44,6 +44,8 @@ export interface Project {
   id: string;
   name: string;
   description?: string;
+  repoUrl?: string;
+  stagingUrl?: string;
   personaCount: number;
   latestScore?: number; // 0..1
   lastRunAt?: string; // ISO-8601
@@ -54,6 +56,7 @@ export interface Repo {
   projectId: string;
   name: string;
   stagingUrl: string;
+  repoUrl?: string;
   viewport: Viewport;
   personaIds: string[];
 }

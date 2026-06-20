@@ -87,13 +87,13 @@ const H = 3_600_000;
 const D = 86_400_000;
 
 export const projects: Project[] = [
-  { id: "proj-mydigital", name: "MyDigital ID Onboarding", description: "National e-ID sign-up & verification flow.", personaCount: 6, latestScore: 0.62, lastRunAt: ago(2 * H) },
-  { id: "proj-finbank", name: "FinBank Account Opening", description: "Retail bank digital account opening.", personaCount: 4, latestScore: 0.81, lastRunAt: ago(2 * D) },
+  { id: "proj-mydigital", name: "MyDigital ID Onboarding", description: "National e-ID sign-up & verification flow.", repoUrl: "https://github.com/mydigital/mydigital-web", stagingUrl: "https://staging.mydigital.gov.my", personaCount: 6, latestScore: 0.62, lastRunAt: ago(2 * H) },
+  { id: "proj-finbank", name: "FinBank Account Opening", description: "Retail bank digital account opening.", repoUrl: "https://github.com/finbank/onboarding", stagingUrl: "https://staging.finbank.com", personaCount: 4, latestScore: 0.81, lastRunAt: ago(2 * D) },
 ];
 
 export const repos: Repo[] = [
-  { id: "repo-mydigital", projectId: "proj-mydigital", name: "mydigital-web (staging)", stagingUrl: "https://staging.mydigital.gov.my", viewport: "desktop", personaIds: ["p-mei", "p-david", "p-siti", "p-raj", "p-grace", "p-tom"] },
-  { id: "repo-finbank", projectId: "proj-finbank", name: "finbank-onboarding (staging)", stagingUrl: "https://staging.finbank.com", viewport: "mobile", personaIds: ["p-david", "p-raj", "p-lina", "p-ahmad"] },
+  { id: "repo-mydigital", projectId: "proj-mydigital", name: "mydigital-web (staging)", stagingUrl: "https://staging.mydigital.gov.my", repoUrl: "https://github.com/mydigital/mydigital-web", viewport: "desktop", personaIds: ["p-mei", "p-david", "p-siti", "p-raj", "p-grace", "p-tom"] },
+  { id: "repo-finbank", projectId: "proj-finbank", name: "finbank-onboarding (staging)", stagingUrl: "https://staging.finbank.com", repoUrl: "https://github.com/finbank/onboarding", viewport: "mobile", personaIds: ["p-david", "p-raj", "p-lina", "p-ahmad"] },
 ];
 
 // ── matrix builder: derive friction matrix from persona results ──

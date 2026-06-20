@@ -40,3 +40,13 @@ replays/
 
 # OS
 .DS_Store
+
+opencode.json
+
+# Caveman / Ponytail plugins & skills
+.agents/
+.forge/
+.opencode/
+hooks/
+skills/
+skills-lock.json

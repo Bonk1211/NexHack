@@ -26,7 +26,7 @@ export function ScoreRing({ value, size = 132 }: { value: number; size?: number 
   return (
     <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="-rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#2c2c2e" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#e5e5e7" strokeWidth={stroke} />
         <circle
           cx={size / 2}
           cy={size / 2}
@@ -41,11 +41,8 @@ export function ScoreRing({ value, size = 132 }: { value: number; size?: number 
         />
       </svg>
       <div className="absolute flex flex-col items-center">
-        <span className="font-display text-[44px] leading-none tabular-nums text-[#f5f5f7]">
+        <span className="font-display text-[44px] leading-none tabular-nums text-primary">
           {Math.round(clamped * 100)}
-        </span>
-        <span className="mt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-on-dark-dim">
-          Score
         </span>
       </div>
     </div>

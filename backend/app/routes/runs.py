@@ -81,6 +81,64 @@ def _serve_screenshots(pack: dict) -> None:
             frame["screenshot_url"] = _to_served_url(frame.get("screenshot_url"))
 
 
+@router.get("/apps")
+def list_apps() -> list[dict]:
+    """All apps with metadata for the projects listing page."""
+    return repository.list_apps()
+
+
+@router.get("/apps/{app_id}")
+def get_app(app_id: str) -> dict:
+    """Single app detail for the project detail page."""
+    result = repository.get_app(app_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="App not found")
+    return result
+
+
+class CreateAppRequest(BaseModel):
+    name: str
+    stagingUrl: str | None = None
+    repoUrl: str | None = None
+
+
+@router.post("/apps")
+def create_app(req: CreateAppRequest) -> dict:
+    """Create a new app."""
+    result = repository.create_app(req.name, req.stagingUrl, req.repoUrl)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to create app")
+    return result
+
+
+class LinkPersonaRequest(BaseModel):
+    personaId: str
+
+
+@router.post("/apps/{app_id}/personas")
+def link_persona_to_app(app_id: str, req: LinkPersonaRequest) -> dict:
+    """Link a persona to an app."""
+    success = repository.link_persona_to_app(app_id, req.personaId)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to link persona")
+    return {"success": True}
+
+
+@router.delete("/apps/{app_id}/personas/{persona_id}")
+def unlink_persona_from_app(app_id: str, persona_id: str) -> dict:
+    """Unlink a persona from an app."""
+    success = repository.unlink_persona_from_app(app_id, persona_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to unlink persona")
+    return {"success": True}
+
+
+@router.get("/apps/{app_id}/personas")
+def get_linked_personas(app_id: str) -> list[str]:
+    """Get list of persona IDs linked to an app."""
+    return repository.get_linked_personas_for_app(app_id)
+
+
 @router.get("")
 def list_runs(app_name: str | None = None) -> list[dict]:
     """Run listing.

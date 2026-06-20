@@ -34,6 +34,18 @@ export interface ReplayClip {
   frames: ReplayFrame[];
 }
 
+export interface PersonaStep {
+  step_idx: number;
+  step_key: string;
+  dwell_s: number;
+  completed: boolean;
+  dead_end: boolean;
+  backtracked: boolean;
+  llm_judgment?: { confusion: number };
+  wcag_conformance: Record<string, string>;
+  axe_violations: string[];
+}
+
 export interface PersonaResult {
   persona: string;
   verdict: string;
@@ -41,6 +53,7 @@ export interface PersonaResult {
   blocked_at: string | null;
   wcag_failures: string[];
   inclusion_score: number;
+  steps?: PersonaStep[];
 }
 
 export interface MatrixCell {

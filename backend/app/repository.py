@@ -35,7 +35,10 @@ def list_runs(app_name: str, limit: int = 50) -> list[dict]:
     from app.db import get_client  # deferred — keeps this module import network-free
 
     client = get_client()
-    app_id = _app_id_for(app_name)
+    apps = client.table("apps").select("id").eq("name", app_name).limit(1).execute().data or []
+    if not apps:
+        return []
+    app_id = apps[0]["id"]
     res = (
         client.table("runs")
         .select("id, mode, status, inclusion_score, created_at")
@@ -100,6 +103,7 @@ def persist_run(
     run_id: str | None = None,
     mode: str = "sequential",
     target_url: str | None = None,
+    repo_url: str | None = None,
     usage: dict | None = None,
 ) -> str:
     """Persist an evidence pack into run history and return its run_id.
@@ -123,13 +127,25 @@ def persist_run(
 
     client = get_client()
 
-    # apps (§17): the runs table requires app_id (FK → apps). Upsert a stable app
-    # row by name first so every run satisfies the constraint and is recorded.
+    # apps (§17): the runs table requires app_id (FK → apps). Look up existing app
+    # by name first; only create a new one with a deterministic ID if not found.
     app_name = pack.get("app") or "app"
-    app_id = _app_id_for(app_name)
-    client.table("apps").upsert(
-        {"id": app_id, "name": app_name, "staging_url": target_url or ""}
-    ).execute()
+    existing = client.table("apps").select("id").eq("name", app_name).limit(1).execute().data or []
+    if existing:
+        app_id = existing[0]["id"]
+        if repo_url or target_url:
+            patch: dict = {}
+            if repo_url:
+                patch["repo_url"] = repo_url
+            if target_url:
+                patch["staging_url"] = target_url
+            client.table("apps").update(patch).eq("id", app_id).execute()
+    else:
+        app_id = _app_id_for(app_name)
+        app_row = {"id": app_id, "name": app_name, "staging_url": target_url or ""}
+        if repo_url:
+            app_row["repo_url"] = repo_url
+        client.table("apps").upsert(app_row).execute()
 
     # runs (§17): one row per assessment, carrying the derived inclusion score and
     # (when available) the LLM usage rollup (dashboard §3.1).
@@ -554,3 +570,135 @@ def set_figurine_status(slug: str, status: str, url: str | None = None) -> None:
     if url is not None:
         patch["figurine_url"] = url
     get_client().table("personas").update(patch).eq("slug", slug).execute()
+
+
+# ── App-persona linking ──────────────────────────────────────────────────────
+
+def _resolve_persona_id(client, persona_id: str) -> str | None:
+    """Resolve a persona identifier to its UUID. Accepts UUID or slug."""
+    # If it looks like a UUID already, use it
+    if len(persona_id) == 36 and persona_id.count("-") == 4:
+        return persona_id
+    # Otherwise treat as slug and look up
+    row = client.table("personas").select("id").eq("slug", persona_id).limit(1).execute().data
+    return row[0]["id"] if row else None
+
+
+def link_persona_to_app(app_id: str, persona_id: str) -> bool:
+    """Link a persona to an app. Returns True if successful."""
+    if not _has_creds():
+        return False
+    from app.db import get_client
+    client = get_client()
+    uuid = _resolve_persona_id(client, persona_id)
+    if not uuid:
+        return False
+    # Check if already linked
+    existing = client.table("app_personas").select("persona_id").eq("app_id", app_id).eq("persona_id", uuid).execute()
+    if existing.data:
+        return True
+    # Link them
+    result = client.table("app_personas").insert({"app_id": app_id, "persona_id": uuid}).execute()
+    return bool(result.data)
+
+
+def unlink_persona_from_app(app_id: str, persona_id: str) -> bool:
+    """Unlink a persona from an app. Returns True if successful."""
+    if not _has_creds():
+        return False
+    from app.db import get_client
+    client = get_client()
+    uuid = _resolve_persona_id(client, persona_id)
+    if not uuid:
+        return False
+    result = client.table("app_personas").delete().eq("app_id", app_id).eq("persona_id", uuid).execute()
+    return bool(result.data)
+
+
+def get_linked_personas_for_app(app_id: str) -> list[str]:
+    """Get list of persona slugs linked to an app."""
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    result = client.table("app_personas").select("persona_id").eq("app_id", app_id).execute()
+    uuids = [row["persona_id"] for row in (result.data or [])]
+    if not uuids:
+        return []
+    # Resolve UUIDs back to slugs so frontend can match
+    personas = client.table("personas").select("slug").in_("id", uuids).execute()
+    return [row["slug"] for row in (personas.data or [])]
+
+
+def list_apps() -> list[dict]:
+    """All apps with latest run metadata for the projects listing."""
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    apps = client.table("apps").select("*").order("created_at", desc=True).execute().data or []
+    result = []
+    for app in apps:
+        runs = client.table("runs").select("id, inclusion_score, created_at").eq("app_id", app["id"]).order("created_at", desc=True).limit(1).execute().data or []
+        personas = client.table("app_personas").select("persona_id").eq("app_id", app["id"]).execute().data or []
+        latest = runs[0] if runs else None
+        result.append({
+            "id": app["id"],
+            "name": app["name"],
+            "stagingUrl": app.get("staging_url"),
+            "repoUrl": app.get("repo_url"),
+            "personaCount": len(personas),
+            "latestScore": float(latest["inclusion_score"]) if latest and latest.get("inclusion_score") is not None else None,
+            "lastRunAt": latest.get("created_at") if latest else None,
+        })
+    return result
+
+
+def get_app(app_id: str) -> dict | None:
+    """Single app with full detail for project detail page."""
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    client = get_client()
+    apps = client.table("apps").select("*").eq("id", app_id).limit(1).execute().data or []
+    if not apps:
+        return None
+    app = apps[0]
+    runs = client.table("runs").select("id, inclusion_score, created_at").eq("app_id", app["id"]).order("created_at", desc=True).limit(1).execute().data or []
+    personas = client.table("app_personas").select("persona_id").eq("app_id", app["id"]).execute().data or []
+    latest = runs[0] if runs else None
+    return {
+        "id": app["id"],
+        "name": app["name"],
+        "stagingUrl": app.get("staging_url"),
+        "repoUrl": app.get("repo_url"),
+        "personaCount": len(personas),
+        "latestScore": float(latest["inclusion_score"]) if latest and latest.get("inclusion_score") is not None else None,
+        "lastRunAt": latest.get("created_at") if latest else None,
+    }
+
+
+def create_app(name: str, staging_url: str | None = None, repo_url: str | None = None) -> dict | None:
+    """Create a new app and return it."""
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    client = get_client()
+    app_id = _app_id_for(name)
+    row = {"id": app_id, "name": name, "staging_url": staging_url or "", "viewport": "mobile"}
+    if repo_url:
+        row["repo_url"] = repo_url
+    res = client.table("apps").upsert(row, on_conflict="id").execute()
+    rows = res.data or []
+    if not rows:
+        return None
+    app = rows[0]
+    return {
+        "id": app["id"],
+        "name": app["name"],
+        "stagingUrl": app.get("staging_url"),
+        "repoUrl": app.get("repo_url"),
+        "personaCount": 0,
+        "latestScore": None,
+        "lastRunAt": None,
+    }
