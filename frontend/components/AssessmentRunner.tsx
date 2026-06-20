@@ -56,7 +56,7 @@ interface NodeCardItem {
 interface LiveState {
   runNodes: string[]; // run-scope nodes seen, in order (for the pipeline bar)
   log: NodeCardItem[]; // every node execution, with its output
-  frame?: { persona: string; data: string }; // latest live-browser JPEG (base64)
+  frames: Record<string, string>; // persona stem → latest live-browser JPEG (base64)
   n: number; // monotonic id source
 }
 
@@ -68,7 +68,7 @@ function push(s: LiveState, item: Omit<NodeCardItem, "id">): LiveState {
 
 function reduce(s: LiveState, e: StreamEvent): LiveState {
   if (e.type === "frame") {
-    return { ...s, frame: { persona: e.persona, data: e.data } };
+    return { ...s, frames: { ...s.frames, [e.persona]: e.data } };
   }
   if (e.type === "node" && e.scope === "run") {
     const runNodes = s.runNodes.includes(e.node) ? s.runNodes : [...s.runNodes, e.node];
@@ -102,9 +102,11 @@ function reduce(s: LiveState, e: StreamEvent): LiveState {
 export default function AssessmentRunner({
   defaultTarget = DEFAULT_TARGET,
   defaultAppName = "DemoBank",
+  mode = "sequential",
 }: {
   defaultTarget?: string;
   defaultAppName?: string;
+  mode?: "sequential" | "parallel";
 }) {
   const [personas, setPersonas] = useState<PersonaOption[]>([]);
   const [selected, setSelected] = useState<string[]>(["control", "oku_visual", "oku_motor"]);
@@ -116,6 +118,9 @@ export default function AssessmentRunner({
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  // After a run completes both views coexist; this toggles which one is shown so
+  // the user can move back and forth between the live preview and the results.
+  const [view, setView] = useState<"live" | "results">("live");
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -132,10 +137,11 @@ export default function AssessmentRunner({
     setLoading(true);
     setError(null);
     setPack(null);
-    setLive({ runNodes: [], log: [], n: 1 });
+    setLive({ runNodes: [], log: [], frames: {}, n: 1 });
     setUsage(null);
+    setView("live");
     esRef.current?.close();
-    esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected }, (e) => {
+    esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected, mode }, (e) => {
       if (e.type === "usage") {
         setUsage(e.summary);
         return;
@@ -144,7 +150,8 @@ export default function AssessmentRunner({
         setPack(e.pack);
         setRunId(e.run_id);
         if (e.usage) setUsage(e.usage);
-        setLive(null);
+        // Keep `live` so the preview stays available; surface the results view.
+        setView("results");
         setLoading(false);
         esRef.current?.close();
         return;
@@ -217,8 +224,26 @@ export default function AssessmentRunner({
         {usage && <UsageTicker usage={usage} live={!!live} />}
       </section>
 
-      {live && <LiveView live={live} />}
-      {pack && <Results pack={pack} runId={runId} usage={usage} />}
+      {/* Once a run finishes, both views coexist — switch between them freely. */}
+      {pack && (
+        <div className="mt-6 inline-flex items-center gap-1 rounded-lg bg-field p-1">
+          {(["live", "results"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className={`rounded-md px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
+                view === v ? "bg-card text-primary shadow-sm" : "text-secondary hover:text-primary"
+              }`}
+            >
+              {v === "live" ? "Live preview" : "Results"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {live && (!pack || view === "live") && <LiveView live={live} />}
+      {pack && view === "results" && <Results pack={pack} runId={runId} usage={usage} />}
     </div>
   );
 }
@@ -335,6 +360,11 @@ function NodeOutputCard({ item }: { item: NodeCardItem }) {
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${dot}`} />
           <span className="font-mono text-[12px] text-primary">{title}</span>
+          {item.scope === "run" && (
+            <span className="rounded-full bg-field px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-tertiary">
+              shared
+            </span>
+          )}
         </div>
         {entries.length > 0 && (
           <dl className="mt-1.5 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">
@@ -353,78 +383,108 @@ function NodeOutputCard({ item }: { item: NodeCardItem }) {
 
 function LiveView({ live }: { live: LiveState }) {
   const lastRunNode = live.runNodes[live.runNodes.length - 1];
+
+  // Personas present in this run, in stream order. Persona-scope log items establish
+  // the order; any persona that has only streamed a frame so far is appended.
+  const personas: string[] = [];
+  for (const item of live.log) {
+    if (item.scope === "persona" && item.persona && !personas.includes(item.persona)) {
+      personas.push(item.persona);
+    }
+  }
+  for (const p of Object.keys(live.frames)) {
+    if (!personas.includes(p)) personas.push(p);
+  }
+
+  return (
+    <section className="mt-8 space-y-4">
+      {/* Run pipeline bar — run-scope nodes, shared across all personas (rendered once) */}
+      <div>
+        <h2 className="section-label mb-2">Graph nodes</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {RUN_PIPELINE.map((n, i) => {
+            const seen = live.runNodes.includes(n);
+            const active = lastRunNode === n && n !== "alerts";
+            return (
+              <span key={n} className="flex items-center gap-2">
+                <span
+                  className={`rounded-full px-3 py-1 text-[12px] ${
+                    active
+                      ? "bg-brand text-white animate-pulse"
+                      : seen
+                        ? "bg-anchor text-on-dark"
+                        : "bg-field text-tertiary"
+                  }`}
+                >
+                  {n}
+                </span>
+                {i < RUN_PIPELINE.length - 1 && <span className="text-tertiary">→</span>}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* One column per persona — own live browser + own node-reasoning feed (no mixing) */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {personas.map((p) => (
+          <PersonaColumn
+            key={p}
+            persona={p}
+            frame={live.frames[p]}
+            // Each column carries the shared run-scope nodes (init/aggregate/score/
+            // evidence/alerts) interleaved with this persona's own nodes, in stream order.
+            items={live.log.filter(
+              (it) => it.scope === "run" || (it.scope === "persona" && it.persona === p),
+            )}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// One persona's live lane: its CDP screencast frame above its own node feed. Each
+// column owns its scroll ref so feeds autoscroll independently.
+function PersonaColumn({
+  persona,
+  frame,
+  items,
+}: {
+  persona: string;
+  frame?: string;
+  items: NodeCardItem[];
+}) {
   const feedRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [live.log.length]);
+  }, [items.length]);
 
   return (
-    <section className="mt-8">
-      <div className="grid gap-6 md:grid-cols-[300px_1fr]">
-        {/* Live browser — the external app the agent is driving (CDP screencast) */}
-        <div>
-          <h2 className="section-label mb-2">Live browser</h2>
-          <div className="overflow-hidden rounded-[28px] border-4 border-anchor bg-anchor">
-            {live.frame ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={`data:image/jpeg;base64,${live.frame.data}`}
-                alt="live agent browser"
-                className="block w-full"
-              />
-            ) : (
-              <div className="flex h-[560px] items-center justify-center text-[12px] text-on-dark-dim">
-                launching browser…
-              </div>
-            )}
+    <div className="rounded-card bg-card p-3">
+      <h3 className="section-label mb-2">{persona}</h3>
+      <div className="overflow-hidden rounded-[20px] border-4 border-anchor bg-anchor">
+        {frame ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={`data:image/jpeg;base64,${frame}`}
+            alt={`${persona} live browser`}
+            className="block w-full"
+          />
+        ) : (
+          <div className="flex h-[320px] items-center justify-center text-[12px] text-on-dark-dim">
+            launching browser…
           </div>
-          {live.frame && (
-            <p className="mt-2 text-center text-[12px] text-tertiary">
-              {live.frame.persona} · iPhone 13 viewport
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-4">
-          {/* Run pipeline bar */}
-          <div>
-            <h2 className="section-label mb-2">Graph nodes</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              {RUN_PIPELINE.map((n, i) => {
-                const seen = live.runNodes.includes(n);
-                const active = lastRunNode === n && n !== "alerts";
-                return (
-                  <span key={n} className="flex items-center gap-2">
-                    <span
-                      className={`rounded-full px-3 py-1 text-[12px] ${
-                        active
-                          ? "bg-brand text-white animate-pulse"
-                          : seen
-                            ? "bg-anchor text-on-dark"
-                            : "bg-field text-tertiary"
-                      }`}
-                    >
-                      {n}
-                    </span>
-                    {i < RUN_PIPELINE.length - 1 && <span className="text-tertiary">→</span>}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Per-node output feed (one card per node execution) */}
-          <div>
-            <h2 className="section-label mb-2">Node outputs</h2>
-            <div ref={feedRef} className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
-              {live.log.map((item) => (
-                <NodeOutputCard key={item.id} item={item} />
-              ))}
-            </div>
-          </div>
-        </div>
+        )}
       </div>
-    </section>
+      <div ref={feedRef} className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
+        {items.length === 0 ? (
+          <p className="text-[12px] text-tertiary">waiting for nodes…</p>
+        ) : (
+          items.map((item) => <NodeOutputCard key={item.id} item={item} />)
+        )}
+      </div>
+    </div>
   );
 }
 

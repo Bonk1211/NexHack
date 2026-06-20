@@ -50,10 +50,11 @@ export default function ProjectDetailPage() {
     });
   }, [projectId]);
 
-  // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner.
+  // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner
+  // in the runs tab, directly above run history.
   function handleStartRun() {
     setShowRunner(true);
-    setTab("overview");
+    setTab("runs");
   }
 
   if (loading) {
@@ -142,21 +143,6 @@ export default function ProjectDetailPage() {
       </div>
 
       <div className="px-10 py-8">
-        {showRunner && tab === "overview" && (
-          <div className="mb-8">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="section-label">Acceptance test — live agent run</h2>
-              <button
-                type="button"
-                onClick={() => setShowRunner(false)}
-                className="text-[12px] text-secondary hover:text-primary"
-              >
-                Hide
-              </button>
-            </div>
-            <AssessmentRunner defaultAppName={project.name} />
-          </div>
-        )}
         {tab === "overview" && (
           <OverviewTab project={project} personaNames={personaNames} />
         )}
@@ -170,7 +156,16 @@ export default function ProjectDetailPage() {
             }}
           />
         )}
-        {tab === "runs" && <RunsTab runs={runs} projectId={projectId} />}
+        {tab === "runs" && (
+          <RunsTab
+            runs={runs}
+            projectId={projectId}
+            showRunner={showRunner}
+            onHide={() => setShowRunner(false)}
+            appName={project.name}
+            mode={runMode}
+          />
+        )}
       </div>
     </div>
   );
@@ -390,9 +385,38 @@ function AddPersonaModal({
   );
 }
 
-function RunsTab({ runs, projectId }: { runs: RunSummary[]; projectId: string }) {
+function RunsTab({
+  runs,
+  projectId,
+  showRunner,
+  onHide,
+  appName,
+  mode,
+}: {
+  runs: RunSummary[];
+  projectId: string;
+  showRunner: boolean;
+  onHide: () => void;
+  appName: string;
+  mode: RunMode;
+}) {
   return (
     <div>
+      {showRunner && (
+        <div className="mb-8">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="section-label">Acceptance test — live agent run</h2>
+            <button
+              type="button"
+              onClick={onHide}
+              className="text-[12px] text-secondary hover:text-primary"
+            >
+              Hide
+            </button>
+          </div>
+          <AssessmentRunner defaultAppName={appName} mode={mode} />
+        </div>
+      )}
       <h2 className="section-label">Run history</h2>
       <div className="mt-5">
         {runs.length === 0 ? (

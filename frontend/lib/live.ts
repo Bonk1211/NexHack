@@ -144,13 +144,14 @@ export type StreamEvent =
 
 /** Open an SSE run; calls onEvent for each event. Returns the EventSource (caller closes it). */
 export function streamRun(
-  input: { appName: string; targetUrl: string; personaNames: string[] },
+  input: { appName: string; targetUrl: string; personaNames: string[]; mode?: "sequential" | "parallel" },
   onEvent: (e: StreamEvent) => void,
 ): EventSource {
   const qs = new URLSearchParams({
     app_name: input.appName,
     target_url: input.targetUrl,
     persona_names: input.personaNames.join(","),
+    mode: input.mode ?? "sequential",
   });
   const es = new EventSource(`${BASE_URL}/runs/stream?${qs.toString()}`);
   es.onmessage = (m) => {
