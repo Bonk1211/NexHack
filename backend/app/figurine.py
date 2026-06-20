@@ -20,6 +20,53 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+_LANGUAGE_FALLBACK = {
+    "cantonese": "Chinese Malaysian with East Asian features",
+    "mandarin": "Chinese Malaysian with East Asian features",
+    "bahasa melayu": "Malay Malaysian",
+    "tamil": "Indian Malaysian with South Asian features",
+}
+
+_ETHNICITY_SYSTEM = (
+    "You infer ethnic appearance from a person's name for use in an image generation prompt. "
+    "Reply with ONLY a short noun phrase (5-10 words) describing the likely ethnic appearance, "
+    "e.g. 'Chinese Malaysian with East Asian features', 'Malay Malaysian', "
+    "'Indian Malaysian with South Asian features', 'White Caucasian Western'. "
+    "No explanation, no punctuation at the end, just the phrase."
+)
+
+
+def _ethnicity_from_name_llm(name: str) -> str | None:
+    """Ask DeepSeek flash to infer ethnic appearance from name. Returns None on any failure."""
+    from app.config import settings
+    if not settings.llm_api_key:
+        return None
+    try:
+        from langchain_deepseek import ChatDeepSeek
+        from langchain_core.messages import HumanMessage, SystemMessage
+        client = ChatDeepSeek(
+            model=settings.llm_model_step,
+            api_key=settings.llm_api_key,
+            api_base=settings.llm_base_url,
+            temperature=0,
+            max_retries=1,
+        )
+        resp = client.invoke([
+            SystemMessage(content=_ETHNICITY_SYSTEM),
+            HumanMessage(content=f"Name: {name}"),
+        ])
+        result = resp.content.strip().strip(".")
+        # Strip any "Name: " or "Name — " prefix the model may echo back
+        if ":" in result:
+            result = result.split(":", 1)[-1].strip()
+        if "—" in result:
+            result = result.split("—", 1)[-1].strip()
+        return result if result else None
+    except Exception as exc:
+        logger.warning("LLM ethnicity inference failed for %s: %s", name, exc)
+        return None
+
+
 def _build_prompt(row: dict) -> str:
     name: str = row.get("name") or "a person"
     age_band: str = row.get("age_band") or "adult"
@@ -28,15 +75,8 @@ def _build_prompt(row: dict) -> str:
     tech: float = float(row.get("tech_savviness") or 0.5)
     label: str = row.get("label") or ""
 
-    # Culture hint from language
-    culture_map = {
-        "cantonese": "Chinese Malaysian",
-        "mandarin": "Chinese Malaysian",
-        "bahasa melayu": "Malay",
-        "tamil": "Indian Malaysian",
-        "english": "Malaysian",
-    }
-    culture = culture_map.get(language.lower(), "Malaysian")
+    # Ethnicity: LLM infers from name, falls back to language mapping
+    culture = _ethnicity_from_name_llm(name) or _LANGUAGE_FALLBACK.get(language.lower(), "Malaysian")
 
     # Tech savviness visual cues
     if tech < 0.35:
@@ -73,8 +113,8 @@ def _build_prompt(row: dict) -> str:
     label_note = f" ({label})" if label else ""
 
     return (
-        f"A single cute collectible vinyl toy figurine of a {age_band} year old "
-        f"{culture} person named {name}{label_note}. "
+        f"A single cute collectible vinyl toy figurine of a {age_band} year old person "
+        f"named {name}, {culture}. "
         f"Character: {disability_str}, {tech_hint}. "
         f"Style: Funko Pop inspired but softer and rounder — large round head, "
         f"small compact body, smooth plastic sheen, subtle cel-shading, "

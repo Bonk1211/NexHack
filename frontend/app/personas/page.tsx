@@ -43,7 +43,7 @@ export default function PersonasPage() {
       ) : (
         <div className="mt-8 grid grid-cols-4 gap-5">
           {personas.map((p, i) => (
-            <div key={p.id} className="rise" style={{ animationDelay: `${i * 30}ms` }}>
+            <div key={p.id} className="rise h-full" style={{ animationDelay: `${i * 30}ms` }}>
               <PersonaLibraryCard persona={p} />
             </div>
           ))}
@@ -60,7 +60,7 @@ function PersonaLibraryCard({ persona }: { persona: Persona }) {
   return (
     <Link
       href={`/personas/${persona.id}`}
-      className="card group block p-5 no-underline transition-all duration-200 ease-out hover:-translate-y-0.5"
+      className="card group flex h-full min-h-[160px] flex-col p-5 no-underline transition-all duration-200 ease-out hover:-translate-y-0.5"
     >
       <div className="flex items-start gap-3">
         <div className="h-12 w-12 shrink-0 overflow-hidden rounded-full">
@@ -81,7 +81,7 @@ function PersonaLibraryCard({ persona }: { persona: Persona }) {
       </div>
 
       {chips.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
           {chips.map((chip) => (
             <span
               key={chip}
