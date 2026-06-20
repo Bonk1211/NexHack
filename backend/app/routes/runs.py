@@ -93,15 +93,17 @@ def start_run(req: StartRunRequest) -> dict:
             artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
         )
 
+        # Serialize usage first so it persists onto the run row (dashboard §3.2).
+        usage = tracker.serialized()
+
         # Best-effort persistence — swallow DB errors so the demo path never breaks.
         try:
-            repository.persist_run(pack)
+            repository.persist_run(pack, usage)
         except Exception:
             pass
 
         # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
         _serve_screenshots(pack)
-        usage = tracker.serialized()
 
     _STORE[run_id] = {"pack": pack, "usage": usage}
     return {"run_id": run_id, "pack": pack, "usage": usage}
@@ -254,15 +256,16 @@ def stream_run(
                               "blocked_personas": blocked,
                               "rollup": pack["synthesis"].get("rollup")}})
 
+            # Serialize usage first so it persists onto the run row (dashboard §3.2).
+            usage = tracker.serialized()
             try:
-                repository.persist_run(pack)
+                repository.persist_run(pack, usage)
             except Exception:
                 pass
             _serve_screenshots(pack)
             q.put({"type": "node", "scope": "run", "node": "alerts",
                    "output": {"p0_alerts": len([p for p in pack["personas"]
                                                 if p.get("severity") == "P0"])}})
-            usage = tracker.serialized()
             _STORE[rid] = {"pack": pack, "usage": usage}
             _safe_enqueue(q, {"type": "usage", "summary": usage})
             q.put({"type": "final", "run_id": rid, "pack": pack, "usage": usage})
