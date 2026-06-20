@@ -7,11 +7,18 @@ import {
   getProject,
   getProjectRuns,
   getPersonas,
+  getProjectDashboard,
   startRun,
   linkPersona,
   unlinkPersona,
 } from "@/lib/api";
-import type { ProjectDetail, RunSummary, Persona, RunMode } from "@/lib/types";
+import type {
+  ProjectDetail,
+  RunSummary,
+  Persona,
+  RunMode,
+  ProjectDashboard,
+} from "@/lib/types";
 import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
@@ -20,7 +27,7 @@ import AssessmentRunner from "@/components/AssessmentRunner";
 import { RunLog } from "@/components/RunLog";
 import { StatusDot } from "@/components/StatusDot";
 
-type Tab = "overview" | "personas" | "runs";
+type Tab = "overview" | "dashboard" | "personas" | "runs";
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -31,6 +38,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [allPersonas, setAllPersonas] = useState<Persona[]>([]);
+  const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [runMode, setRunMode] = useState<RunMode>("sequential");
   const [showRunner, setShowRunner] = useState(false);
@@ -42,10 +50,12 @@ export default function ProjectDetailPage() {
       getProject(projectId),
       getProjectRuns(projectId),
       getPersonas(),
-    ]).then(([p, r, personas]) => {
+      getProjectDashboard(projectId),
+    ]).then(([p, r, personas, dash]) => {
       setProject(p);
       setRuns(r);
       setAllPersonas(personas);
+      setDashboard(dash);
       setLoading(false);
     });
   }, [projectId]);
@@ -123,7 +133,7 @@ export default function ProjectDetailPage() {
 
       <div className="border-b border-hairline px-10">
         <div className="flex gap-6">
-          {(["overview", "personas", "runs"] as Tab[]).map((t) => (
+          {(["overview", "dashboard", "personas", "runs"] as Tab[]).map((t) => (
             <button
               key={t}
               type="button"
@@ -159,6 +169,9 @@ export default function ProjectDetailPage() {
         )}
         {tab === "overview" && (
           <OverviewTab project={project} personaNames={personaNames} />
+        )}
+        {tab === "dashboard" && (
+          <DashboardTab dashboard={dashboard} projectId={projectId} />
         )}
         {tab === "personas" && (
           <PersonasTab
@@ -431,6 +444,292 @@ function RunsTab({ runs, projectId }: { runs: RunSummary[]; projectId: string })
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard tab (spec §6) ────────────────────────────────────
+// Aggregated, multi-run view per project. Two-stream discipline (§16) preserved:
+// WCAG trend is TRUSTED, persona/score trends are INDICATIVE/DERIVED, cost is
+// operational metadata and never feeds the score.
+
+const SEV_CHIP: Record<string, string> = {
+  P0: "bg-blocked/12 text-blocked",
+  P1: "bg-[#b25e00]/12 text-[#b25e00]",
+  P2: "bg-[#b25e00]/10 text-[#9a6a00]",
+  P3: "bg-field text-secondary",
+};
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
+}
+
+function fmtCost(n: number, currency: string, applied: boolean): string {
+  const v = currency === "USD" ? `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}` : `${n.toFixed(4)} ${currency}`;
+  return applied ? v : `${v} est.`;
+}
+
+function Delta({ curr, prev, pct = false }: { curr: number; prev?: number; pct?: boolean }) {
+  if (prev == null) return null;
+  const d = curr - prev;
+  if (Math.abs(d) < 1e-9) return <span className="text-[12px] text-tertiary">±0</span>;
+  const up = d > 0;
+  const mag = pct ? `${Math.abs(Math.round(d * 100))}` : `${Math.abs(d).toFixed(2)}`;
+  return (
+    <span className={`text-[12px] font-medium ${up ? "text-ok" : "text-blocked"}`}>
+      {up ? "▲" : "▼"} {mag}
+    </span>
+  );
+}
+
+function KpiCard({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="card p-5">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">{label}</div>
+      <div className="mt-3">{children}</div>
+    </div>
+  );
+}
+
+// Score line + blocked bars over runs (DERIVED + INDICATIVE).
+function ScoreBlockChart({ trend }: { trend: ProjectDashboard["trend"] }) {
+  const W = 320;
+  const H = 96;
+  const pad = 10;
+  const n = trend.length;
+  const maxBlocked = Math.max(1, ...trend.map((t) => t.blockedCount));
+  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+  const yScore = (s: number) => H - pad - s * (H - 2 * pad);
+  const line = trend.map((t, i) => `${x(i)},${yScore(t.overallScore)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full" preserveAspectRatio="none">
+      {trend.map((t, i) => {
+        const bh = (t.blockedCount / maxBlocked) * (H - 2 * pad);
+        const bw = Math.min(18, (W - 2 * pad) / Math.max(n, 1) - 6);
+        return (
+          <rect key={t.runId} x={x(i) - bw / 2} y={H - pad - bh} width={bw} height={bh} rx={2} fill="#c8362f" opacity={0.18} />
+        );
+      })}
+      <polyline points={line} fill="none" stroke="#d97a2b" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {trend.map((t, i) => (
+        <circle key={t.runId} cx={x(i)} cy={yScore(t.overallScore)} r={3} fill="#d97a2b" />
+      ))}
+    </svg>
+  );
+}
+
+// Single-series line in a fixed [min,max] domain.
+function LineChart({ values, color, min = 0, max = 1 }: { values: number[]; color: string; min?: number; max?: number }) {
+  const W = 320;
+  const H = 96;
+  const pad = 10;
+  const n = values.length;
+  const span = max - min || 1;
+  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+  const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
+  const line = values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full" preserveAspectRatio="none">
+      <polyline points={line} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {values.map((v, i) => (
+        <circle key={i} cx={x(i)} cy={y(v)} r={3} fill={color} />
+      ))}
+    </svg>
+  );
+}
+
+function ChartCard({ title, badge, hasData, children }: { title: string; badge?: string; hasData: boolean; children: React.ReactNode }) {
+  return (
+    <div className="card p-5">
+      <div className="flex items-center gap-2">
+        <h3 className="text-[13px] font-semibold text-primary">{title}</h3>
+        {badge && (
+          <span className="rounded-full bg-ok/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">
+            {badge}
+          </span>
+        )}
+      </div>
+      <div className="mt-4">
+        {hasData ? (
+          children
+        ) : (
+          <p className="py-8 text-center text-[13px] text-tertiary">Needs ≥2 runs to chart a trend.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | null; projectId: string }) {
+  if (!dashboard || dashboard.runsCount === 0) {
+    return (
+      <div className="py-12 text-center text-secondary">
+        No runs yet. Start an acceptance test — the dashboard aggregates across runs once data exists.
+      </div>
+    );
+  }
+
+  const { trend, personaReliability, usageByModel, actions } = dashboard;
+  const last = trend[trend.length - 1];
+  const prev = trend.length >= 2 ? trend[trend.length - 2] : undefined;
+  const openP0 = actions.filter((a) => a.severity === "P0").length;
+  const multiRun = trend.length >= 2;
+
+  return (
+    <div className="space-y-8">
+      {/* Row A — KPI cards */}
+      <div className="grid grid-cols-4 gap-4">
+        <KpiCard label="Inclusion score">
+          <div className="flex items-end gap-2">
+            <span className="font-display text-[34px] leading-none tabular-nums text-primary">{scorePct(last.overallScore)}</span>
+            <Delta curr={last.overallScore} prev={prev?.overallScore} pct />
+          </div>
+          <div className="mt-1 text-[11px] text-tertiary">latest of {dashboard.runsCount} runs · DERIVED</div>
+        </KpiCard>
+
+        <KpiCard label="WCAG pass rate">
+          <div className="flex items-end gap-2">
+            <span className="font-display text-[34px] leading-none tabular-nums text-primary">{scorePct(last.wcagPassRate)}%</span>
+            <Delta curr={last.wcagPassRate} prev={prev?.wcagPassRate} pct />
+          </div>
+          <div className="mt-1">
+            <span className="rounded-full bg-ok/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">Trusted</span>
+          </div>
+        </KpiCard>
+
+        <KpiCard label="Open P0 blocks">
+          <span className={`font-display text-[34px] leading-none tabular-nums ${openP0 > 0 ? "text-blocked" : "text-ok"}`}>{openP0}</span>
+          <div className="mt-1 text-[11px] text-tertiary">{actions.length} open action{actions.length !== 1 ? "s" : ""}</div>
+        </KpiCard>
+
+        <KpiCard label="LLM cost">
+          <div className="font-display text-[28px] leading-none tabular-nums text-primary">
+            {fmtCost(dashboard.totalCost, dashboard.currency, dashboard.pricingApplied)}
+          </div>
+          <div className="mt-1 text-[11px] text-tertiary">{fmtTokens(dashboard.totalTokens)} tokens · across runs</div>
+        </KpiCard>
+      </div>
+
+      {/* Row B — trends */}
+      <div className="grid grid-cols-2 gap-4">
+        <ChartCard title="Score & blocks over runs" hasData={multiRun}>
+          <ScoreBlockChart trend={trend} />
+          <div className="mt-2 flex items-center gap-4 text-[11px] text-tertiary">
+            <span className="flex items-center gap-1"><span className="inline-block h-[2px] w-3 bg-[#d97a2b]" /> score</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-sm bg-blocked/20" /> blocked</span>
+          </div>
+        </ChartCard>
+        <ChartCard title="WCAG pass-rate trend" badge="Trusted" hasData={multiRun}>
+          <LineChart values={trend.map((t) => t.wcagPassRate)} color="#1d8a4e" />
+        </ChartCard>
+      </div>
+
+      {/* Row C — cost efficiency */}
+      <div className="grid grid-cols-2 gap-4">
+        <ChartCard title="Cost & tokens per run" hasData={multiRun}>
+          <LineChart values={trend.map((t) => t.cost)} color="#6b7280" min={0} max={Math.max(...trend.map((t) => t.cost), 0.0001)} />
+          <div className="mt-2 text-[11px] text-tertiary">
+            {trend.map((t) => fmtTokens(t.totalTokens)).join(" → ")} tokens/run
+          </div>
+        </ChartCard>
+        <div className="card p-5">
+          <h3 className="text-[13px] font-semibold text-primary">Usage by model</h3>
+          <div className="mt-1 text-[11px] text-tertiary">DeepSeek V4 today · table survives a model swap</div>
+          <table className="mt-3 w-full text-[12px]">
+            <thead>
+              <tr className="text-left text-tertiary">
+                <th className="pb-2 font-medium">Model</th>
+                <th className="pb-2 text-right font-medium">Prompt</th>
+                <th className="pb-2 text-right font-medium">Compl.</th>
+                <th className="pb-2 text-right font-medium">Total</th>
+                <th className="pb-2 text-right font-medium">Cost</th>
+              </tr>
+            </thead>
+            <tbody className="tabular-nums">
+              {usageByModel.map((m) => (
+                <tr key={m.model} className="border-t border-hairline">
+                  <td className="py-2 text-primary">{m.model}</td>
+                  <td className="py-2 text-right text-secondary">{fmtTokens(m.promptTokens)}</td>
+                  <td className="py-2 text-right text-secondary">{fmtTokens(m.completionTokens)}</td>
+                  <td className="py-2 text-right text-secondary">{fmtTokens(m.totalTokens)}</td>
+                  <td className="py-2 text-right text-secondary">{fmtCost(m.cost, dashboard.currency, m.pricingApplied)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Row D — persona reliability */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-[13px] font-semibold text-primary">Persona reliability</h3>
+          <span className="rounded-full bg-field px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary">Indicative</span>
+        </div>
+        <table className="mt-3 w-full text-[13px]">
+          <thead>
+            <tr className="text-left text-tertiary text-[12px]">
+              <th className="pb-2 font-medium">Persona</th>
+              <th className="pb-2 text-right font-medium">Runs</th>
+              <th className="pb-2 text-right font-medium">Blocked</th>
+              <th className="pb-2 font-medium">Block rate</th>
+              <th className="pb-2 text-right font-medium">Last</th>
+            </tr>
+          </thead>
+          <tbody>
+            {personaReliability.map((p) => (
+              <tr key={p.personaId} className="border-t border-hairline">
+                <td className="py-2.5 font-medium text-primary">{p.name}</td>
+                <td className="py-2.5 text-right tabular-nums text-secondary">{p.runsCount}</td>
+                <td className="py-2.5 text-right tabular-nums text-secondary">{p.blockedCount}</td>
+                <td className="py-2.5">
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-24 overflow-hidden rounded-full bg-field">
+                      <div className="h-full rounded-full bg-blocked" style={{ width: `${Math.round(p.blockRate * 100)}%` }} />
+                    </div>
+                    <span className="tabular-nums text-[12px] text-secondary">{Math.round(p.blockRate * 100)}%</span>
+                  </div>
+                </td>
+                <td className="py-2.5">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <StatusDot status={p.lastStatus} />
+                    <span className="text-[12px] capitalize text-secondary">{p.lastStatus}</span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Row E — action queue */}
+      <div className="card p-5">
+        <h3 className="text-[13px] font-semibold text-primary">Action queue</h3>
+        <div className="mt-1 text-[11px] text-tertiary">Open P0/P1 blocks · P0 → P3, most recent first</div>
+        <div className="mt-3 space-y-2">
+          {actions.length === 0 ? (
+            <p className="py-6 text-center text-[13px] text-ok">No open P0/P1 blocks. 🎉</p>
+          ) : (
+            actions.map((a, i) => (
+              <Link
+                key={`${a.runId}-${a.personaId}-${i}`}
+                href={`/projects/${projectId}/runs/${a.runId}`}
+                className="flex items-center justify-between rounded-lg border border-hairline p-3 no-underline transition-colors hover:bg-field"
+              >
+                <div className="flex items-center gap-3">
+                  <span className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${SEV_CHIP[a.severity] ?? SEV_CHIP.P3}`}>{a.severity}</span>
+                  <span className="text-[13px] font-medium text-primary">{a.personaName}</span>
+                  <span className="text-[12px] text-secondary">blocked at <span className="text-primary">{a.blockedAt || "—"}</span></span>
+                  {a.wcagCriterion && <span className="text-[11px] text-tertiary">WCAG {a.wcagCriterion}</span>}
+                </div>
+                {a.owner && <span className="text-[11px] text-tertiary">→ {a.owner}</span>}
+              </Link>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

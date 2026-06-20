@@ -112,3 +112,134 @@ def test_persist_is_noop_without_creds(monkeypatch):
     monkeypatch.setattr(db, "get_client", _boom)
     run_id = repository.persist_run(_pack_with_steps())
     assert isinstance(run_id, str) and len(run_id) > 0
+
+
+# ── usage persistence (dashboard §3.2) ────────────────────────────────────────
+
+_USAGE = {
+    "currency": "USD",
+    "total_prompt_tokens": 1200,
+    "total_completion_tokens": 800,
+    "total_tokens": 2000,
+    "total_cost": 0.42,
+    "pricing_applied": True,
+    "models": [
+        {"model": "deepseek-v4-flash", "prompt_tokens": 1000, "completion_tokens": 500,
+         "total_tokens": 1500, "cost": 0.21, "pricing_applied": True},
+        {"model": "deepseek-v4-pro", "prompt_tokens": 200, "completion_tokens": 300,
+         "total_tokens": 500, "cost": 0.21, "pricing_applied": True},
+    ],
+}
+
+
+def test_persist_writes_usage_rollup_and_per_model(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    sink: dict[str, list] = {}
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClient(sink))
+
+    run_id = repository.persist_run(_pack_with_steps(), _USAGE)
+
+    run_row = sink["runs"][0]
+    assert run_row["total_tokens"] == 2000
+    assert run_row["prompt_tokens"] == 1200
+    assert run_row["completion_tokens"] == 800
+    assert run_row["llm_cost"] == 0.42
+    assert run_row["pricing_applied"] is True
+
+    models = sink["run_model_usage"]
+    assert len(models) == 2
+    assert {m["model"] for m in models} == {"deepseek-v4-flash", "deepseek-v4-pro"}
+    assert all(m["run_id"] == run_id for m in models)
+
+
+def test_persist_without_usage_omits_model_rows(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    sink: dict[str, list] = {}
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClient(sink))
+
+    repository.persist_run(_pack_with_steps())  # no usage arg
+
+    assert "run_model_usage" not in sink
+    assert "total_tokens" not in sink["runs"][0]
+
+
+# ── pure dashboard aggregation (dashboard §5) ─────────────────────────────────
+
+def _dashboard_rows():
+    runs_rows = [
+        {"id": "r1", "created_at": "2026-06-01T00:00:00Z", "inclusion_score": 0.55,
+         "total_tokens": 1000, "llm_cost": 0.10, "llm_currency": "USD", "pricing_applied": True},
+        {"id": "r2", "created_at": "2026-06-03T00:00:00Z", "inclusion_score": 0.62,
+         "total_tokens": 1500, "llm_cost": 0.20, "llm_currency": "USD", "pricing_applied": True},
+    ]
+    personas_rows = [
+        {"run_id": "r1", "persona_id": "mei", "persona_name": "Mei", "verdict": "blocked",
+         "severity": "P0", "blocked_at": "otp"},
+        {"run_id": "r1", "persona_id": "david", "persona_name": "David", "verdict": "completed",
+         "severity": "P3", "blocked_at": None},
+        {"run_id": "r2", "persona_id": "mei", "persona_name": "Mei", "verdict": "blocked",
+         "severity": "P1", "blocked_at": "upload"},
+        {"run_id": "r2", "persona_id": "david", "persona_name": "David", "verdict": "completed",
+         "severity": "P3", "blocked_at": None},
+    ]
+    model_rows = [
+        {"model": "deepseek-v4-flash", "prompt_tokens": 600, "completion_tokens": 300,
+         "total_tokens": 900, "cost": 0.05, "pricing_applied": True},
+        {"model": "deepseek-v4-flash", "prompt_tokens": 700, "completion_tokens": 400,
+         "total_tokens": 1100, "cost": 0.06, "pricing_applied": True},
+        {"model": "deepseek-v4-pro", "prompt_tokens": 200, "completion_tokens": 300,
+         "total_tokens": 500, "cost": 0.19, "pricing_applied": True},
+    ]
+    return runs_rows, personas_rows, model_rows
+
+
+def test_aggregate_dashboard_shape_and_math():
+    runs_rows, personas_rows, model_rows = _dashboard_rows()
+    d = repository.aggregate_dashboard(
+        "proj", runs_rows, personas_rows, model_rows,
+        wcag_by_run={"r1": 0.5, "r2": 0.75},
+    )
+
+    assert d["runsCount"] == 2
+    assert d["latestScore"] == 0.62           # newest run by created_at
+    assert d["totalTokens"] == 2500
+    assert round(d["totalCost"], 2) == 0.30
+    assert d["pricingApplied"] is True
+
+    # trend is oldest → newest, carries per-run blocked + trusted wcag rate
+    assert [t["runId"] for t in d["trend"]] == ["r1", "r2"]
+    assert d["trend"][0]["blockedCount"] == 1
+    assert d["trend"][1]["wcagPassRate"] == 0.75
+
+    # Mei blocked in both runs → blockRate 1.0, sorts first
+    mei = d["personaReliability"][0]
+    assert mei["name"] == "Mei" and mei["blockRate"] == 1.0
+    assert mei["lastStatus"] == "blocked"
+    david = next(p for p in d["personaReliability"] if p["name"] == "David")
+    assert david["blockRate"] == 0.0 and david["lastStatus"] == "ok"
+
+    # usage summed by model, flash pooled across runs
+    flash = next(m for m in d["usageByModel"] if m["model"] == "deepseek-v4-flash")
+    assert flash["totalTokens"] == 2000 and flash["promptTokens"] == 1300
+
+    # action queue: only open P0/P1 blocks, P0 before P1
+    assert [a["severity"] for a in d["actions"]] == ["P0", "P1"]
+    assert d["actions"][0]["personaName"] == "Mei" and d["actions"][0]["blockedAt"] == "otp"
+
+
+def test_aggregate_dashboard_empty():
+    d = repository.aggregate_dashboard("proj", [], [], [])
+    assert d["runsCount"] == 0 and d["latestScore"] is None
+    assert d["trend"] == [] and d["actions"] == []
+
+
+def test_wcag_pass_rate_by_run_pools_criteria():
+    rp_rows = [{"id": "rp1", "run_id": "r1"}, {"id": "rp2", "run_id": "r1"}]
+    event_rows = [
+        {"run_personas_id": "rp1", "wcag_conformance": {"1.4.3": "pass", "4.1.2": "fail"}},
+        {"run_personas_id": "rp2", "wcag_conformance": {"1.4.3": "pass"}},
+    ]
+    rates = repository.wcag_pass_rate_by_run(["r1"], rp_rows, event_rows)
+    assert rates["r1"] == 2 / 3

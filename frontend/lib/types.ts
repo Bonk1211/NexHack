@@ -113,6 +113,73 @@ export interface RunSummary {
   blockedCount: number;
 }
 
+// ── Per-project aggregated dashboard (dashboard spec §5) ──
+// Cost is operational metadata only (§16): never feeds the inclusion score.
+export interface UsageModel {
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number;
+  pricingApplied: boolean;
+}
+
+export interface RunUsage {
+  currency: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number;
+  pricingApplied: boolean;
+  models: UsageModel[];
+}
+
+// One point per run, oldest → newest, for trend charts.
+export interface RunTrendPoint {
+  runId: string;
+  createdAt: string;
+  overallScore: number; // composite (DERIVED)
+  blockedCount: number; // INDICATIVE
+  wcagPassRate: number; // 0..1 TRUSTED
+  totalTokens: number;
+  cost: number;
+}
+
+export interface PersonaReliability {
+  personaId: string;
+  name: string;
+  runsCount: number;
+  blockedCount: number; // across runs
+  blockRate: number; // 0..1, blockedCount / runsCount
+  lastStatus: Severity;
+}
+
+export interface ActionItem {
+  runId: string;
+  personaId: string;
+  personaName: string;
+  severity: "P0" | "P1" | "P2" | "P3";
+  blockedAt: string; // step key
+  wcagCriterion?: string; // from trusted stream when available
+  owner?: string; // routed owning area (§13 remediation)
+}
+
+export interface ProjectDashboard {
+  projectId: string;
+  runsCount: number;
+  latestScore?: number;
+  // headline cards
+  totalTokens: number;
+  totalCost: number;
+  currency: string;
+  pricingApplied: boolean;
+  // sections
+  trend: RunTrendPoint[];
+  personaReliability: PersonaReliability[];
+  usageByModel: UsageModel[]; // summed across runs
+  actions: ActionItem[]; // open P0/P1, sorted by severity then recency
+}
+
 // ── SSE event payloads (GET /runs/:id/stream) ──
 export interface PersonaStepEvent {
   type: "persona_step";
