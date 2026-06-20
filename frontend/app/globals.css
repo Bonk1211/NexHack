@@ -20,6 +20,10 @@
   /* One interactive accent */
   --color-brand: #0066cc;
 
+  /* Warm accent (score ring, CTA buttons) */
+  --color-accent: #d97a2b;
+  --color-accent-dark: #b8631f;
+
   /* Semantic (desaturated) */
   --color-ok: #1d8a4e;
   --color-friction: #b25e00;
@@ -185,4 +189,29 @@ body {
   width: 100%;
   height: 100%;
   border: 0;
+}
+
+/* ── Compact phone frame for project cards ── */
+/* Renders at 375px internally, scaled down to 140×296 visible */
+.phone-frame-sm {
+  position: relative;
+  width: 140px;
+  height: 296px;
+  border-radius: 18px;
+  border: 2px solid var(--color-hairline);
+  background: var(--color-field);
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+.phone-frame-sm iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 375px;
+  height: 812px;
+  border: 0;
+  transform: scale(0.3733);
+  transform-origin: top left;
+  pointer-events: none;
 }

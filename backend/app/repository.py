@@ -630,6 +630,43 @@ def get_linked_personas_for_app(app_id: str) -> list[str]:
     return [row["slug"] for row in (personas.data or [])]
 
 
+# ── Flow steps ───────────────────────────────────────────────────────────────
+
+def get_flow_steps(app_id: str) -> list[dict]:
+    """Get flow steps for an app."""
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    result = client.table("apps").select("flow_steps").eq("id", app_id).limit(1).execute()
+    if not result.data:
+        return []
+    return result.data[0].get("flow_steps") or []
+
+
+def update_flow_steps(app_id: str, steps: list[dict]) -> bool:
+    """Update flow steps for an app. Returns True if successful."""
+    if not _has_creds():
+        return False
+    from app.db import get_client
+    client = get_client()
+    result = client.table("apps").update({"flow_steps": steps}).eq("id", app_id).execute()
+    return bool(result.data)
+
+
+def _app_to_dict(app: dict, personas: list, latest_run: dict | None) -> dict:
+    return {
+        "id": app["id"],
+        "name": app["name"],
+        "description": app.get("description"),
+        "stagingUrl": app.get("staging_url"),
+        "repoUrl": app.get("repo_url"),
+        "personaCount": len(personas),
+        "latestScore": float(latest_run["inclusion_score"]) if latest_run and latest_run.get("inclusion_score") is not None else None,
+        "lastRunAt": latest_run.get("created_at") if latest_run else None,
+    }
+
+
 def list_apps() -> list[dict]:
     """All apps with latest run metadata for the projects listing."""
     if not _has_creds():
@@ -641,16 +678,7 @@ def list_apps() -> list[dict]:
     for app in apps:
         runs = client.table("runs").select("id, inclusion_score, created_at").eq("app_id", app["id"]).order("created_at", desc=True).limit(1).execute().data or []
         personas = client.table("app_personas").select("persona_id").eq("app_id", app["id"]).execute().data or []
-        latest = runs[0] if runs else None
-        result.append({
-            "id": app["id"],
-            "name": app["name"],
-            "stagingUrl": app.get("staging_url"),
-            "repoUrl": app.get("repo_url"),
-            "personaCount": len(personas),
-            "latestScore": float(latest["inclusion_score"]) if latest and latest.get("inclusion_score") is not None else None,
-            "lastRunAt": latest.get("created_at") if latest else None,
-        })
+        result.append(_app_to_dict(app, personas, runs[0] if runs else None))
     return result
 
 
@@ -666,19 +694,83 @@ def get_app(app_id: str) -> dict | None:
     app = apps[0]
     runs = client.table("runs").select("id, inclusion_score, created_at").eq("app_id", app["id"]).order("created_at", desc=True).limit(1).execute().data or []
     personas = client.table("app_personas").select("persona_id").eq("app_id", app["id"]).execute().data or []
-    latest = runs[0] if runs else None
-    return {
-        "id": app["id"],
-        "name": app["name"],
-        "stagingUrl": app.get("staging_url"),
-        "repoUrl": app.get("repo_url"),
-        "personaCount": len(personas),
-        "latestScore": float(latest["inclusion_score"]) if latest and latest.get("inclusion_score") is not None else None,
-        "lastRunAt": latest.get("created_at") if latest else None,
-    }
+    return _app_to_dict(app, personas, runs[0] if runs else None)
 
 
-def create_app(name: str, staging_url: str | None = None, repo_url: str | None = None) -> dict | None:
+def update_app(app_id: str, patch: dict) -> dict | None:
+    """Patch an app's metadata fields and return the updated record."""
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    client = get_client()
+    col_map = {"description": "description"}
+    db_patch = {col_map[k]: v for k, v in patch.items() if k in col_map}
+    if not db_patch:
+        return get_app(app_id)
+    client.table("apps").update(db_patch).eq("id", app_id).execute()
+    return get_app(app_id)
+
+
+# ── Demographics segments ──────────────────────────────────────────────────────
+
+def _compute_percentages(segments: list[dict]) -> list[dict]:
+    """Attach evenly-divided percentage to each segment."""
+    n = len(segments)
+    if n == 0:
+        return []
+    base = 100 // n
+    remainder = 100 - base * n
+    result = []
+    for i, seg in enumerate(segments):
+        result.append({**seg, "percentage": base + (1 if i < remainder else 0)})
+    return result
+
+
+def get_demographics(app_id: str) -> list[dict]:
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    rows = (
+        client.table("app_demographics")
+        .select("id, label, description, sort_order")
+        .eq("app_id", app_id)
+        .order("sort_order")
+        .order("created_at")
+        .execute()
+        .data or []
+    )
+    return _compute_percentages([
+        {"id": r["id"], "label": r["label"], "description": r.get("description")}
+        for r in rows
+    ])
+
+
+def add_demographic(app_id: str, label: str, description: str | None) -> list[dict]:
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    existing = client.table("app_demographics").select("id").eq("app_id", app_id).execute().data or []
+    client.table("app_demographics").insert({
+        "app_id": app_id,
+        "label": label,
+        "description": description,
+        "sort_order": len(existing),
+    }).execute()
+    return get_demographics(app_id)
+
+
+def delete_demographic(app_id: str, demo_id: str) -> list[dict]:
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    client = get_client()
+    client.table("app_demographics").delete().eq("id", demo_id).eq("app_id", app_id).execute()
+    return get_demographics(app_id)
+
+
+def create_app(name: str, staging_url: str | None = None, repo_url: str | None = None, description: str | None = None) -> dict | None:
     """Create a new app and return it."""
     if not _has_creds():
         return None
@@ -688,17 +780,10 @@ def create_app(name: str, staging_url: str | None = None, repo_url: str | None =
     row = {"id": app_id, "name": name, "staging_url": staging_url or "", "viewport": "mobile"}
     if repo_url:
         row["repo_url"] = repo_url
+    if description:
+        row["description"] = description
     res = client.table("apps").upsert(row, on_conflict="id").execute()
     rows = res.data or []
     if not rows:
         return None
-    app = rows[0]
-    return {
-        "id": app["id"],
-        "name": app["name"],
-        "stagingUrl": app.get("staging_url"),
-        "repoUrl": app.get("repo_url"),
-        "personaCount": 0,
-        "latestScore": None,
-        "lastRunAt": None,
-    }
+    return _app_to_dict(rows[0], [], None)

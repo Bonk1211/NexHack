@@ -1,18 +1,19 @@
-export function PhonePreview({ url }: { url?: string }) {
+export function PhonePreview({ url, compact }: { url?: string; compact?: boolean }) {
+  const frame = compact ? "phone-frame-sm" : "phone-frame";
+
   if (!url) {
     return (
-      <div className="phone-frame flex items-center justify-center bg-field">
+      <div className={`${frame} flex items-center justify-center`}>
         <span className="text-[12px] text-tertiary">No preview</span>
       </div>
     );
   }
 
   return (
-    <div className="phone-frame">
+    <div className={frame}>
       <iframe
         src={url}
         title="Site preview"
-        className="h-full w-full border-0"
         sandbox="allow-scripts allow-same-origin"
       />
     </div>

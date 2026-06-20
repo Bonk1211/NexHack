@@ -8,6 +8,15 @@ export type RunMode = "sequential" | "parallel";
 export type FigurineStatus = "none" | "generating" | "ready" | "failed";
 export type Viewport = "desktop" | "tablet" | "mobile";
 
+export interface FlowStep {
+  key: string;
+  action: "fill" | "click" | "view";
+  role: string;
+  name: string;
+  value: string;
+  critical: boolean;
+}
+
 // TODO(cohort-sampling): BehaviorValue is currently always a plain number.
 // When cohort mode is enabled, each field can become { mean, spread } to seed
 // N personas from the same demographic with varied parameters.
@@ -49,6 +58,33 @@ export interface Project {
   personaCount: number;
   latestScore?: number; // 0..1
   lastRunAt?: string; // ISO-8601
+}
+
+export interface DemographicSegment {
+  id: string;
+  label: string;
+  description?: string;
+  percentage: number; // computed evenly server-side
+}
+
+export interface PersonaSuggestion {
+  type: "existing" | "new";
+  // existing
+  persona_id?: string;
+  // new
+  name?: string;
+  label?: string;
+  age_band?: string;
+  language?: string;
+  disabilities?: string[];
+  tech_savviness?: number;
+  dwell_multiplier?: number;
+  giveup_threshold_s?: number;
+  misinterpret_prob?: number;
+  // both
+  match_segment: string;
+  match_reason: string;
+  match_detail?: string;
 }
 
 export interface Repo {

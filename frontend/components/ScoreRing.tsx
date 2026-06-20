@@ -41,7 +41,10 @@ export function ScoreRing({ value, size = 132 }: { value: number; size?: number 
         />
       </svg>
       <div className="absolute flex flex-col items-center">
-        <span className="font-display text-[44px] leading-none tabular-nums text-primary">
+        <span
+          className="font-display leading-none tabular-nums text-primary"
+          style={{ fontSize: Math.max(10, Math.round(size * 0.333)) }}
+        >
           {Math.round(clamped * 100)}
         </span>
       </div>

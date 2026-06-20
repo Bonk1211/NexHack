@@ -14,6 +14,9 @@ import type {
   UsageModel,
   ActionItem,
   Severity,
+  FlowStep,
+  DemographicSegment,
+  PersonaSuggestion,
 } from "./types";
 import {
   projects as fixtureProjects,
@@ -98,6 +101,21 @@ export async function getLinkedPersonas(appId: string): Promise<string[]> {
   return res.json();
 }
 
+export async function getFlowSteps(appId: string): Promise<FlowStep[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/flow`);
+  if (!res.ok) throw new Error(`GET /runs/apps/${appId}/flow failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateFlowSteps(appId: string, steps: FlowStep[]): Promise<void> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/flow`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ steps }),
+  });
+  if (!res.ok) throw new Error(`PUT /runs/apps/${appId}/flow failed: ${res.status}`);
+}
+
 export async function createProject(input: {
   name: string;
   description?: string;
@@ -108,7 +126,7 @@ export async function createProject(input: {
     const res = await fetch(`${BASE_URL}/runs/apps`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: input.name, stagingUrl: input.stagingUrl, repoUrl: input.repoUrl }),
+      body: JSON.stringify({ name: input.name, stagingUrl: input.stagingUrl, repoUrl: input.repoUrl, description: input.description }),
     });
     if (res.ok) return res.json();
   } catch {}
@@ -123,6 +141,58 @@ export async function createProject(input: {
   };
   db.projects.push(p);
   return { ...p };
+}
+
+export async function updateProject(
+  id: string,
+  patch: { description?: string },
+): Promise<Project> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`PATCH /runs/apps/${id} failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getDemographics(appId: string): Promise<DemographicSegment[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/demographics`);
+  if (!res.ok) throw new Error(`GET demographics failed: ${res.status}`);
+  return res.json();
+}
+
+export async function addDemographic(
+  appId: string,
+  label: string,
+  description?: string,
+): Promise<DemographicSegment[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/demographics`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label, description }),
+  });
+  if (!res.ok) throw new Error(`POST demographics failed: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDemographic(
+  appId: string,
+  demoId: string,
+): Promise<DemographicSegment[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/demographics/${demoId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`DELETE demographics failed: ${res.status}`);
+  return res.json();
+}
+
+export async function suggestPersonas(appId: string): Promise<PersonaSuggestion[]> {
+  const res = await fetch(`${BASE_URL}/runs/apps/${appId}/suggest-personas`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`POST suggest-personas failed: ${res.status}`);
+  return res.json();
 }
 
 export async function getProject(id: string): Promise<ProjectDetail> {

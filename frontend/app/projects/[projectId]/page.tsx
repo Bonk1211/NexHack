@@ -12,7 +12,16 @@ import {
   linkPersonaToApp,
   unlinkPersonaFromApp,
   getLinkedPersonas,
+  getFlowSteps,
+  updateFlowSteps,
+  getDemographics,
+  addDemographic,
+  deleteDemographic,
+  suggestPersonas,
+  createPersona,
 } from "@/lib/api";
+import { DonutChart, DEMO_PALETTE } from "@/components/DonutChart";
+import type { DemographicSegment, PersonaSuggestion } from "@/lib/types";
 import { listRuns, type RunHistoryItem } from "@/lib/live";
 import type {
   ProjectDetail,
@@ -20,6 +29,7 @@ import type {
   Persona,
   RunMode,
   ProjectDashboard,
+  FlowStep,
 } from "@/lib/types";
 
 // Map a Supabase-backed run-history row to the UI's RunSummary shape.
@@ -41,6 +51,7 @@ import AssessmentRunner from "@/components/AssessmentRunner";
 import { RunLog } from "@/components/RunLog";
 import { StatusDot } from "@/components/StatusDot";
 import { PhonePreview } from "@/components/PhonePreview";
+import { FlowEditor } from "@/components/FlowEditor";
 
 type Tab = "overview" | "dashboard" | "personas" | "runs";
 
@@ -54,6 +65,8 @@ export default function ProjectDetailPage() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [allPersonas, setAllPersonas] = useState<Persona[]>([]);
   const [linkedPersonaIds, setLinkedPersonaIds] = useState<string[]>([]);
+  const [flowSteps, setFlowSteps] = useState<FlowStep[]>([]);
+  const [showFlowEditor, setShowFlowEditor] = useState(false);
   const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [runMode, setRunMode] = useState<RunMode>("sequential");
@@ -80,10 +93,12 @@ export default function ProjectDetailPage() {
       getPersonas(),
       getProjectDashboard(projectId),
       getLinkedPersonas(projectId),
-    ]).then(async ([p, r, personas, dash, linkedIds]) => {
+      getFlowSteps(projectId),
+    ]).then(async ([p, r, personas, dash, linkedIds, flow]) => {
       setProject(p);
       setAllPersonas(personas);
       setLinkedPersonaIds(linkedIds);
+      setFlowSteps(flow);
       setDashboard(dash);
       fixtureRunsRef.current = r;
       await loadRuns(p.name, r);
@@ -186,7 +201,12 @@ export default function ProjectDetailPage() {
 
       <div className="px-10 py-8">
         {tab === "overview" && (
-          <OverviewTab project={project} runs={runs} />
+          <OverviewTab
+            project={project}
+            runs={runs}
+            flowSteps={flowSteps}
+            onEditFlow={() => setShowFlowEditor(true)}
+          />
         )}
         {tab === "dashboard" && (
           <DashboardTab dashboard={dashboard} projectId={projectId} />
@@ -216,10 +236,24 @@ export default function ProjectDetailPage() {
               refreshRuns();
             }}
             appName={project.name}
+            stagingUrl={project.stagingUrl}
+            linkedPersonas={linkedPersonas}
             mode={runMode}
           />
         )}
       </div>
+
+      {showFlowEditor && (
+        <FlowEditor
+          steps={flowSteps}
+          onSave={async (steps) => {
+            await updateFlowSteps(projectId, steps);
+            setFlowSteps(steps);
+            setShowFlowEditor(false);
+          }}
+          onClose={() => setShowFlowEditor(false)}
+        />
+      )}
     </div>
   );
 }
@@ -227,10 +261,32 @@ export default function ProjectDetailPage() {
 function OverviewTab({
   project,
   runs,
+  flowSteps,
+  onEditFlow,
 }: {
   project: ProjectDetail;
   runs: RunSummary[];
+  flowSteps: FlowStep[];
+  onEditFlow: () => void;
 }) {
+  const [segments, setSegments] = useState<DemographicSegment[]>([]);
+  const [showAddDemo, setShowAddDemo] = useState(false);
+
+  useEffect(() => {
+    getDemographics(project.id).then(setSegments).catch(() => {});
+  }, [project.id]);
+
+  async function handleAddDemo(label: string, description: string) {
+    const updated = await addDemographic(project.id, label, description || undefined);
+    setSegments(updated);
+    setShowAddDemo(false);
+  }
+
+  async function handleDeleteDemo(demoId: string) {
+    const updated = await deleteDemographic(project.id, demoId);
+    setSegments(updated);
+  }
+
   const [latestCommit, setLatestCommit] = useState<{
     message: string;
     author: string;
@@ -340,6 +396,77 @@ function OverviewTab({
           </div>
         </div>
 
+        <div className="card p-6">
+          <div className="mb-5 flex items-center justify-between">
+            <h3 className="section-label">Target audience</h3>
+            <button
+              type="button"
+              onClick={() => setShowAddDemo(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-field px-3 py-1.5 text-[12px] font-medium text-secondary transition-colors hover:text-primary"
+            >
+              <span className="text-[16px] leading-none">+</span> Add segment
+            </button>
+          </div>
+
+          {segments.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 py-6">
+              <DonutChart segments={[]} size={140} />
+              <p className="text-[13px] text-tertiary">
+                No segments yet — add your first target audience.
+              </p>
+            </div>
+          ) : (
+            <div className="flex gap-6">
+              <div className="shrink-0">
+                <DonutChart segments={segments} size={160} />
+              </div>
+              <div className="flex-1 space-y-3">
+                {segments.map((seg, i) => (
+                  <div key={seg.id} className="flex items-start gap-2.5">
+                    <span
+                      className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: DEMO_PALETTE[i % DEMO_PALETTE.length] }}
+                    />
+                    <div className="group/seg relative min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="truncate text-[13px] font-medium text-primary">{seg.label}</span>
+                        <span className="shrink-0 text-[12px] tabular-nums text-tertiary">{seg.percentage}%</span>
+                      </div>
+                      {seg.description && (
+                        <p className="mt-0.5 line-clamp-2 cursor-default text-[12px] text-secondary">
+                          {seg.description}
+                        </p>
+                      )}
+                      {/* Floating full-text tooltip */}
+                      {seg.description && (
+                        <div className="pointer-events-none absolute left-0 top-full z-50 mt-2 w-72 rounded-xl border border-hairline bg-card p-4 opacity-0 shadow-xl transition-opacity duration-150 group-hover/seg:opacity-100">
+                          <p className="text-[12px] font-medium text-primary">{seg.label}</p>
+                          <p className="mt-1.5 text-[12px] leading-relaxed text-secondary">{seg.description}</p>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteDemo(seg.id)}
+                      className="shrink-0 text-[16px] leading-none text-tertiary transition-colors hover:text-blocked"
+                      aria-label="Remove segment"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {showAddDemo && (
+          <AddDemographicModal
+            onClose={() => setShowAddDemo(false)}
+            onAdd={handleAddDemo}
+          />
+        )}
+
         {latestCommit && (
           <div className="card p-6">
             <h3 className="section-label mb-4">Latest commit</h3>
@@ -359,21 +486,50 @@ function OverviewTab({
           </div>
         )}
 
-        {runs.length > 0 && (
-          <div className="card p-6">
-            <div className="flex items-center justify-between">
-              <h3 className="section-label">Quick actions</h3>
-            </div>
-            <div className="mt-4 flex gap-3">
-              <Link
-                href={`/projects/${project.id}/runs/${latestRun?.id}`}
-                className="rounded-lg bg-field px-4 py-2 text-[13px] font-medium text-primary no-underline transition-colors hover:bg-field/80"
-              >
-                View latest run
-              </Link>
-            </div>
+        <div className="card p-6">
+          <div className="flex items-center justify-between">
+            <h3 className="section-label">Flow steps</h3>
+            <button
+              type="button"
+              onClick={onEditFlow}
+              className="flex items-center gap-1.5 rounded-lg bg-field px-3 py-1.5 text-[12px] font-medium text-secondary transition-colors hover:text-primary"
+            >
+              {flowSteps.length > 0 ? "Edit" : "Configure"}
+            </button>
           </div>
-        )}
+          {flowSteps.length === 0 ? (
+            <p className="mt-3 text-[13px] text-tertiary">
+              No flow steps configured. The default flow (otp → submit) will be used.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {flowSteps.map((step, idx) => (
+                <div key={idx} className="flex items-center gap-3 rounded-lg bg-field p-3">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand/10 text-[11px] font-semibold text-brand">
+                    {idx + 1}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-medium text-primary">{step.key}</span>
+                      <span className="rounded bg-card px-1.5 py-0.5 text-[10px] font-medium uppercase text-secondary">
+                        {step.action}
+                      </span>
+                      {step.critical && (
+                        <span className="rounded bg-blocked/10 px-1.5 py-0.5 text-[10px] font-medium text-blocked">
+                          critical
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-tertiary">
+                      {step.role}{step.name ? ` "${step.name}"` : ""}{step.action === "fill" && step.value ? ` → ${step.value}` : ""}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
       </div>
 
       {project.stagingUrl && (
@@ -384,6 +540,86 @@ function OverviewTab({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function AddDemographicModal({
+  onClose,
+  onAdd,
+}: {
+  onClose: () => void;
+  onAdd: (label: string, description: string) => Promise<void>;
+}) {
+  const [label, setLabel] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!label.trim()) return;
+    setSaving(true);
+    await onAdd(label.trim(), description.trim());
+    setSaving(false);
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="card w-full max-w-md p-7 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="font-display text-[22px] text-primary">Add target audience</h2>
+        <p className="mt-1 text-[13px] text-secondary">Describe one demographic segment for this project.</p>
+
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <div>
+            <label className="mb-1.5 block text-[12px] font-semibold uppercase tracking-[0.06em] text-tertiary">
+              Headline <span className="normal-case tracking-normal font-normal">(5–6 words)</span>
+            </label>
+            <input
+              type="text"
+              value={label}
+              maxLength={60}
+              onChange={(e) => setLabel(e.target.value)}
+              className="input"
+              placeholder="Senior Malaysians, Low-Tech, Visual"
+              required
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[12px] font-semibold uppercase tracking-[0.06em] text-tertiary">
+              Description <span className="normal-case tracking-normal font-normal">(optional)</span>
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="input min-h-[80px] resize-none"
+              placeholder="Primarily 55+ from rural Malaysia, Bahasa Melayu speakers, low digital literacy, some with visual impairments."
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-[13px] text-secondary transition-colors hover:text-primary"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving || !label.trim()}
+              className="rounded-lg bg-accent px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {saving ? "Adding..." : "Add segment"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -400,53 +636,105 @@ function PersonasTab({
   onRefresh: () => void;
 }) {
   const [showModal, setShowModal] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [suggestions, setSuggestions] = useState<PersonaSuggestion[] | null>(null);
 
   async function handleUnlink(personaId: string) {
     await unlinkPersonaFromApp(appId, personaId);
     onRefresh();
   }
 
+  async function handleGenerate() {
+    setGenerating(true);
+    setSuggestions(null);
+    const results = await suggestPersonas(appId);
+    setSuggestions(results);
+    setGenerating(false);
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between">
         <h2 className="section-label">Linked personas</h2>
-        <button
-          type="button"
-          onClick={() => setShowModal(true)}
-          className="rounded-lg bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
-        >
-          Add from library
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={generating}
+            className="flex items-center gap-1.5 rounded-lg border border-accent px-3 py-1.5 text-[13px] font-medium text-accent transition-colors hover:bg-accent hover:text-white disabled:opacity-50"
+          >
+            {generating ? (
+              <>
+                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                Analysing…
+              </>
+            ) : (
+              <>✦ Generate</>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowModal(true)}
+            className="rounded-lg bg-field px-3 py-1.5 text-[13px] font-medium text-secondary transition-colors hover:text-primary"
+          >
+            Add from library
+          </button>
+        </div>
       </div>
 
-      <div className="mt-5 grid grid-cols-4 gap-4">
+      <div className="mt-5 grid grid-cols-4 items-stretch gap-4">
         {linkedPersonas.map((p, i) => (
-          <div key={p.id} className="rise" style={{ animationDelay: `${i * 30}ms` }}>
-            <div className="card p-5">
+          <div
+            key={p.id}
+            className="group/card rise relative z-0 h-full hover:z-10"
+            style={{ animationDelay: `${i * 30}ms` }}
+          >
+            <div className="card flex h-full flex-col p-5">
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 overflow-hidden rounded-full bg-field">
+                  <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-field">
                     {p.figurineUrl && (
-                      <img src={p.figurineUrl} alt={p.identity.name} className="h-10 w-10 rounded-full" />
+                      <img src={p.figurineUrl} alt={p.identity.name} className="h-10 w-10 rounded-full object-cover" />
                     )}
                   </div>
-                  <div>
-                    <div className="font-display text-[15px] text-primary">{p.identity.name}</div>
-                    <div className="text-[12px] text-tertiary">{p.identity.label}</div>
+                  <div className="min-w-0">
+                    <div className="truncate font-display text-[15px] text-primary">{p.identity.name}</div>
+                    <div className="line-clamp-2 text-[12px] text-tertiary">{p.identity.label}</div>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => handleUnlink(p.id)}
-                  className="text-[12px] text-secondary hover:text-blocked"
+                  className="ml-2 shrink-0 text-[12px] text-secondary hover:text-blocked"
                 >
                   Unlink
                 </button>
               </div>
             </div>
+            {/* Tooltip outside the card div — positioned relative to the outer wrapper */}
+            {p.identity.label && (
+              <div className="pointer-events-none absolute left-0 top-full z-50 mt-2 w-64 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/card:opacity-100">
+                <p className="text-[11px] font-medium text-primary">{p.identity.name}</p>
+                <p className="mt-1 text-[12px] leading-relaxed text-secondary">{p.identity.label}</p>
+              </div>
+            )}
           </div>
         ))}
       </div>
+
+      {suggestions !== null && (
+        <SuggestionsPanel
+          suggestions={suggestions}
+          allPersonas={allPersonas}
+          linkedIds={linkedPersonas.map((p) => p.id)}
+          appId={appId}
+          onClose={() => setSuggestions(null)}
+          onDone={() => {
+            setSuggestions(null);
+            onRefresh();
+          }}
+        />
+      )}
 
       {showModal && (
         <AddPersonaModal
@@ -460,6 +748,200 @@ function PersonasTab({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function SuggestionsPanel({
+  suggestions,
+  allPersonas,
+  linkedIds,
+  appId,
+  onClose,
+  onDone,
+}: {
+  suggestions: PersonaSuggestion[];
+  allPersonas: Persona[];
+  linkedIds: string[];
+  appId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<number>>(
+    () => new Set(suggestions.map((_, i) => i))
+  );
+  const [saving, setSaving] = useState(false);
+
+  function toggle(i: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
+  }
+
+  async function handleAdd() {
+    setSaving(true);
+    for (const i of selected) {
+      const s = suggestions[i];
+      if (s.type === "existing" && s.persona_id) {
+        if (!linkedIds.includes(s.persona_id)) {
+          await linkPersonaToApp(appId, s.persona_id).catch(() => {});
+        }
+      } else if (s.type === "new" && s.name) {
+        const p = await createPersona({
+          identity: {
+            name: s.name,
+            label: s.label ?? "",
+            ageBand: s.age_band ?? "25–34",
+            language: s.language ?? "English",
+            disabilities: s.disabilities ?? [],
+            techSavviness: s.tech_savviness ?? 0.5,
+          },
+          behavior: {
+            dwellMultiplier: s.dwell_multiplier ?? 1.0,
+            giveupThresholdS: s.giveup_threshold_s ?? 60,
+            misinterpretProb: s.misinterpret_prob ?? 0.2,
+          },
+        }).catch(() => null);
+        if (p) await linkPersonaToApp(appId, p.id).catch(() => {});
+      }
+    }
+    setSaving(false);
+    onDone();
+  }
+
+  if (suggestions.length === 0) {
+    return (
+      <div className="mt-6 card p-8 text-center">
+        <p className="text-[14px] text-secondary">No suggestions returned. Try adding target audience segments first.</p>
+        <button type="button" onClick={onClose} className="mt-4 text-[13px] text-brand hover:underline">Dismiss</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-6">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h3 className="text-[15px] font-medium text-primary">AI suggested personas</h3>
+          <p className="text-[12px] text-tertiary">Based on your target audience — select which to add</p>
+        </div>
+        <button type="button" onClick={onClose} className="text-[13px] text-secondary hover:text-primary">Dismiss</button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4">
+        {suggestions.map((s, i) => {
+          const existing = s.type === "existing"
+            ? allPersonas.find((p) => p.id === s.persona_id || p.id === s.persona_id)
+            : null;
+          const isSelected = selected.has(i);
+          const alreadyLinked = s.type === "existing" && s.persona_id && linkedIds.includes(s.persona_id);
+
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => !alreadyLinked && toggle(i)}
+              className={`card relative p-5 text-left transition-all ${
+                alreadyLinked
+                  ? "opacity-50 cursor-not-allowed"
+                  : isSelected
+                  ? "ring-2 ring-accent"
+                  : "hover:shadow-md"
+              }`}
+            >
+              {/* Type badge */}
+              <div className="mb-3 flex items-center justify-between">
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                  alreadyLinked
+                    ? "bg-field text-tertiary"
+                    : s.type === "existing"
+                    ? "bg-tint-ok text-ok"
+                    : "bg-tint-friction text-friction"
+                }`}>
+                  {alreadyLinked ? "Already linked" : s.type === "existing" ? "In library" : "New"}
+                </span>
+                {!alreadyLinked && (
+                  <span className={`h-4 w-4 rounded border-2 transition-colors ${
+                    isSelected ? "border-accent bg-accent" : "border-hairline"
+                  }`}>
+                    {isSelected && <span className="flex h-full items-center justify-center text-[9px] text-white">✓</span>}
+                  </span>
+                )}
+              </div>
+
+              {/* Avatar + name */}
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-field">
+                  {existing?.figurineUrl ? (
+                    <img src={existing.figurineUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
+                  ) : (
+                    <div className="flex h-10 w-10 items-center justify-center text-[18px] text-tertiary">
+                      {s.type === "new" ? "?" : "?"}
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate font-display text-[15px] text-primary">
+                    {existing?.identity.name ?? s.name}
+                  </div>
+                  <div className="truncate text-[11px] text-tertiary">
+                    {existing?.identity.label ?? s.label}
+                  </div>
+                </div>
+              </div>
+
+              {/* Traits */}
+              <div className="mt-3 flex flex-wrap gap-1">
+                {[
+                  existing?.identity.ageBand ?? s.age_band,
+                  existing?.identity.language ?? s.language,
+                  ...(existing?.identity.disabilities ?? s.disabilities ?? []),
+                ].filter(Boolean).map((t) => (
+                  <span key={t} className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">{t}</span>
+                ))}
+              </div>
+
+              {/* Segment + reason */}
+              <div className="mt-3 border-t border-hairline pt-3">
+                <span className="text-[11px] font-medium text-accent">{s.match_segment}</span>
+                <div className="mt-2">
+                  <span className="section-label" style={{ fontSize: 10 }}>Reasoning</span>
+                  <p className="mt-1 text-[11px] italic text-tertiary">{s.match_reason}</p>
+                  {s.match_detail && (
+                    <p className="mt-1 text-[11px] text-secondary">{s.match_detail}</p>
+                  )}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() =>
+            setSelected(
+              selected.size === suggestions.length
+                ? new Set()
+                : new Set(suggestions.map((_, i) => i))
+            )
+          }
+          className="text-[13px] text-secondary hover:text-primary"
+        >
+          {selected.size === suggestions.length ? "Deselect all" : "Select all"}
+        </button>
+        <button
+          type="button"
+          onClick={handleAdd}
+          disabled={saving || selected.size === 0}
+          className="rounded-lg bg-accent px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {saving ? "Adding…" : `Add selected (${selected.size})`}
+        </button>
+      </div>
     </div>
   );
 }
@@ -498,14 +980,17 @@ function AddPersonaModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-[480px] rounded-[20px] bg-card p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
+      <div
+        className="flex max-h-[85vh] w-[480px] flex-col rounded-[20px] bg-card p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex shrink-0 items-center justify-between">
           <h3 className="font-display text-[20px] text-primary">Add personas</h3>
           <button type="button" onClick={onClose} className="text-[14px] text-secondary hover:text-primary">
             Close
           </button>
         </div>
-        <div className="mt-4 max-h-[320px] overflow-y-auto">
+        <div className="mt-4 flex-1 overflow-y-auto">
           {available.length === 0 ? (
             <p className="py-8 text-center text-[14px] text-secondary">All personas are already linked.</p>
           ) : (
@@ -514,21 +999,28 @@ function AddPersonaModal({
                 key={p.id}
                 type="button"
                 onClick={() => toggle(p.id)}
-                className={`flex w-full items-center gap-3 rounded-lg p-3 text-left transition-colors ${
+                className={`flex w-full items-start gap-3 rounded-lg p-3 text-left transition-colors ${
                   selected.includes(p.id) ? "bg-brand/10" : "hover:bg-field"
                 }`}
               >
-                <div className="h-8 w-8 overflow-hidden rounded-full bg-field">
+                <div className="mt-0.5 h-8 w-8 shrink-0 overflow-hidden rounded-full bg-field">
                   {p.figurineUrl && (
-                    <img src={p.figurineUrl} alt={p.identity.name} className="h-8 w-8 rounded-full" />
+                    <img src={p.figurineUrl} alt={p.identity.name} className="h-8 w-8 rounded-full object-cover" />
                   )}
                 </div>
-                <div className="flex-1">
-                  <div className="text-[14px] font-medium text-primary">{p.identity.name}</div>
-                  <div className="text-[12px] text-tertiary">{p.identity.label}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[14px] font-medium text-primary">{p.identity.name}</div>
+                  <div className="group/label relative">
+                    <div className="text-[12px] text-tertiary">{p.identity.label}</div>
+                    {p.identity.label && p.identity.label.length > 40 && (
+                      <div className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-72 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/label:opacity-100">
+                        <p className="text-[12px] leading-relaxed text-secondary">{p.identity.label}</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
                 {selected.includes(p.id) && (
-                  <span className="text-brand text-[14px]">✓</span>
+                  <span className="shrink-0 text-[14px] text-brand">✓</span>
                 )}
               </button>
             ))
@@ -538,7 +1030,7 @@ function AddPersonaModal({
           type="button"
           onClick={handleAdd}
           disabled={saving || selected.length === 0}
-          className="mt-4 w-full rounded-xl bg-brand py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="mt-4 w-full shrink-0 rounded-xl bg-brand py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {saving ? "Adding..." : `Add ${selected.length} persona${selected.length !== 1 ? "s" : ""}`}
         </button>
@@ -553,6 +1045,8 @@ function RunsTab({
   showRunner,
   onHide,
   appName,
+  stagingUrl,
+  linkedPersonas,
   mode,
 }: {
   runs: RunSummary[];
@@ -560,6 +1054,8 @@ function RunsTab({
   showRunner: boolean;
   onHide: () => void;
   appName: string;
+  stagingUrl?: string;
+  linkedPersonas: Persona[];
   mode: RunMode;
 }) {
   return (
@@ -576,7 +1072,12 @@ function RunsTab({
               Hide
             </button>
           </div>
-          <AssessmentRunner defaultAppName={appName} mode={mode} />
+          <AssessmentRunner
+            defaultAppName={appName}
+            defaultTarget={stagingUrl}
+            linkedPersonas={linkedPersonas}
+            mode={mode}
+          />
         </div>
       )}
       <h2 className="section-label">Run history</h2>

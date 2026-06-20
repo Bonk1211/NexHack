@@ -26,6 +26,7 @@ from app import orchestrator, repository
 from app.agents.llm import synthesize
 from app.agents.persona_graph import stream_persona
 from app.agents.run_graph import DEFAULT_FLOW, _requires_labels
+from app.agents.navigator import FlowStep
 from app.config import settings
 from app.evidence.export import pack_to_json_bytes, pack_to_pdf_bytes
 from app.evidence.pack import PersonaRunResult, build_pack, build_replay
@@ -42,6 +43,37 @@ _STORE: dict[str, dict] = {}
 
 # Local screenshot store, served as static files at /artifacts (see app.main).
 _ARTIFACTS = pathlib.Path(settings.artifacts_dir).resolve()
+
+
+def _resolve_flow(app_name: str) -> list[FlowStep]:
+    """Look up custom flow steps for an app; fall back to DEFAULT_FLOW."""
+    try:
+        from app.db import get_client
+        client = get_client()
+        apps = client.table("apps").select("id, flow_steps").eq("name", app_name).limit(1).execute().data or []
+        if not apps:
+            logger.info("_resolve_flow: no app found for '%s', using DEFAULT_FLOW", app_name)
+            return DEFAULT_FLOW
+        raw = apps[0].get("flow_steps") or []
+        if not raw:
+            logger.info("_resolve_flow: app '%s' has no flow_steps, using DEFAULT_FLOW", app_name)
+            return DEFAULT_FLOW
+        flow = [
+            FlowStep(
+                key=s.get("key", ""),
+                action=s.get("action", "click"),
+                role=s.get("role", ""),
+                name=s.get("name", ""),
+                value=s.get("value", "000000"),
+                critical=s.get("critical", False),
+            )
+            for s in raw
+        ]
+        logger.info("_resolve_flow: app '%s' using %d custom steps: %s", app_name, len(flow), [s.key for s in flow])
+        return flow
+    except Exception:
+        logger.warning("_resolve_flow: DB error for '%s', using DEFAULT_FLOW", app_name, exc_info=True)
+        return DEFAULT_FLOW
 
 
 class StartRunRequest(BaseModel):
@@ -100,15 +132,62 @@ class CreateAppRequest(BaseModel):
     name: str
     stagingUrl: str | None = None
     repoUrl: str | None = None
+    description: str | None = None
 
 
 @router.post("/apps")
 def create_app(req: CreateAppRequest) -> dict:
     """Create a new app."""
-    result = repository.create_app(req.name, req.stagingUrl, req.repoUrl)
+    result = repository.create_app(req.name, req.stagingUrl, req.repoUrl, req.description)
     if not result:
         raise HTTPException(status_code=500, detail="Failed to create app")
     return result
+
+
+class UpdateAppRequest(BaseModel):
+    description: str | None = None
+
+
+@router.patch("/apps/{app_id}")
+def update_app(app_id: str, req: UpdateAppRequest) -> dict:
+    """Patch an app's metadata."""
+    patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    result = repository.update_app(app_id, patch)
+    if not result:
+        raise HTTPException(status_code=404, detail="App not found")
+    return result
+
+
+# ── Demographics ──────────────────────────────────────────────────────────────
+
+@router.get("/apps/{app_id}/demographics")
+def get_demographics(app_id: str) -> list[dict]:
+    return repository.get_demographics(app_id)
+
+
+class AddDemographicRequest(BaseModel):
+    label: str
+    description: str | None = None
+
+
+@router.post("/apps/{app_id}/demographics")
+def add_demographic(app_id: str, req: AddDemographicRequest) -> list[dict]:
+    return repository.add_demographic(app_id, req.label, req.description)
+
+
+@router.delete("/apps/{app_id}/demographics/{demo_id}")
+def delete_demographic(app_id: str, demo_id: str) -> list[dict]:
+    return repository.delete_demographic(app_id, demo_id)
+
+
+@router.post("/apps/{app_id}/suggest-personas")
+def suggest_personas(app_id: str) -> list[dict]:
+    """Ask DeepSeek to suggest personas for this project based on its demographics."""
+    from app import suggest
+    app = repository.get_app(app_id)
+    if not app:
+        raise HTTPException(status_code=404, detail="App not found")
+    return suggest.suggest_personas(app_id, app["name"])
 
 
 class LinkPersonaRequest(BaseModel):
@@ -139,6 +218,25 @@ def get_linked_personas(app_id: str) -> list[str]:
     return repository.get_linked_personas_for_app(app_id)
 
 
+class UpdateFlowRequest(BaseModel):
+    steps: list[dict]
+
+
+@router.get("/apps/{app_id}/flow")
+def get_flow_steps(app_id: str) -> list[dict]:
+    """Get flow steps for an app."""
+    return repository.get_flow_steps(app_id)
+
+
+@router.put("/apps/{app_id}/flow")
+def update_flow_steps(app_id: str, req: UpdateFlowRequest) -> dict:
+    """Update flow steps for an app."""
+    success = repository.update_flow_steps(app_id, req.steps)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update flow steps")
+    return {"success": True}
+
+
 @router.get("")
 def list_runs(app_name: str | None = None) -> list[dict]:
     """Run listing.
@@ -167,11 +265,13 @@ def start_run(req: StartRunRequest) -> dict:
     # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
     # (returns the existing pack), neither re-runs nor duplicates personas.
     run_id = req.run_id or str(uuid.uuid4())
+    flow = _resolve_flow(req.app_name)
     with track_usage() as tracker:
         pack = orchestrator.run_assessment(
             app_name=req.app_name,
             target_url=req.target_url,
             persona_names=req.persona_names,
+            flow=flow,
             seed=req.seed,
             run_id=run_id,
             artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
@@ -268,7 +368,7 @@ def stream_run(
                     "requires_labels": _requires_labels(cfg),
                     "thresholds": thresholds,
                     "target_url": target_url,
-                    "flow": DEFAULT_FLOW,
+                    "flow": _resolve_flow(app_name),
                     "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
                     "seed": seed + i,                 # §16 deterministic per persona
                     "artifact_dir": str(root / name),  # FR-1.3 screenshot every step

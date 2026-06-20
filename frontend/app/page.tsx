@@ -24,10 +24,7 @@ export default function Home() {
     <div>
       <div className="bg-anchor px-10 pt-16 pb-14">
         <div className="rise">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-on-dark-dim">
-            InclusionScope
-          </div>
-          <h1 className="mt-3 font-display text-[40px] leading-tight text-on-dark">
+          <h1 className="font-display text-[40px] leading-tight text-on-dark">
             Audit every user. Before they leave.
           </h1>
           <p className="mt-2 max-w-lg text-[15px] text-on-dark-dim">
@@ -36,7 +33,7 @@ export default function Home() {
           <button
             type="button"
             onClick={() => setShowNew(true)}
-            className="mt-6 rounded-xl bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
+            className="mt-6 rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
           >
             New project
           </button>
@@ -76,24 +73,74 @@ export default function Home() {
   );
 }
 
-function ProjectCard({ project }: { project: Project }) {
+function healthBadge(score: number): { label: string; className: string } {
+  if (score >= 0.75) return { label: "Passing", className: "bg-tint-ok text-ok" };
+  if (score >= 0.45) return { label: "Needs work", className: "bg-tint-friction text-friction" };
+  return { label: "Critical", className: "bg-tint-blocked text-blocked" };
+}
+
+function PersonaDots({ count }: { count: number }) {
+  const show = Math.min(count, 6);
+  const overflow = count - show;
   return (
-    <div className="card group flex gap-5 p-6 transition-all duration-200 ease-out">
-      <PhonePreview url={project.stagingUrl} />
-      <div className="flex min-w-0 flex-1 flex-col justify-between">
-        <div>
-          <Link
-            href={`/projects/${project.id}`}
-            className="font-display text-[20px] text-primary no-underline hover:underline"
-          >
-            {project.name}
-          </Link>
-          <p className="mt-1 text-[13px] text-secondary">
-            {project.personaCount} persona{project.personaCount !== 1 ? "s" : ""}
-          </p>
+    <div className="flex items-center gap-1">
+      {Array.from({ length: show }).map((_, i) => (
+        <span
+          key={i}
+          className="h-2 w-2 rounded-full bg-accent opacity-80"
+          style={{ opacity: 0.5 + (i / Math.max(show - 1, 1)) * 0.5 }}
+        />
+      ))}
+      {overflow > 0 && (
+        <span className="ml-0.5 text-[11px] text-tertiary">+{overflow}</span>
+      )}
+      <span className="ml-1.5 text-[12px] text-secondary">
+        {count} persona{count !== 1 ? "s" : ""}
+      </span>
+    </div>
+  );
+}
+
+function ProjectCard({ project }: { project: Project }) {
+  const badge = project.latestScore != null ? healthBadge(project.latestScore) : null;
+
+  return (
+    <div className="card group flex gap-4 p-5">
+      <PhonePreview url={project.stagingUrl} compact />
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Top: name + score ring with badge beneath */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Link
+              href={`/projects/${project.id}`}
+              className="block truncate font-display text-[20px] text-primary no-underline hover:underline"
+            >
+              {project.name}
+            </Link>
+            {project.description && (
+              <p className="mt-0.5 line-clamp-1 text-[12px] text-tertiary italic">
+                {project.description}
+              </p>
+            )}
+            <div className="mt-2">
+              <PersonaDots count={project.personaCount} />
+            </div>
+          </div>
+          {project.latestScore != null && (
+            <div className="flex shrink-0 flex-col items-center gap-1.5">
+              <ScoreRing value={project.latestScore} size={52} />
+              {badge && (
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.className}`}>
+                  {badge.label}
+                </span>
+              )}
+            </div>
+          )}
         </div>
-        <div className="flex items-center justify-between">
-          <div className="flex gap-2">
+
+        {/* Bottom: links + timestamp */}
+        <div className="mt-auto pt-4">
+          <div className="flex flex-wrap gap-1.5">
             {project.repoUrl && (
               <a
                 href={project.repoUrl}
@@ -101,7 +148,7 @@ function ProjectCard({ project }: { project: Project }) {
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
               >
-                <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+                <svg className="h-3.5 w-3.5 shrink-0" fill="currentColor" viewBox="0 0 16 16">
                   <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
                 </svg>
                 Repo
@@ -114,21 +161,14 @@ function ProjectCard({ project }: { project: Project }) {
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
               >
-                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                 </svg>
                 Live
               </a>
             )}
           </div>
-          <div className="flex items-center gap-3">
-            {project.latestScore != null && (
-              <ScoreRing value={project.latestScore} size={48} />
-            )}
-          </div>
-        </div>
-        <div className="mt-2 text-[12px] text-tertiary">
-          {relativeTime(project.lastRunAt)}
+          <p className="mt-3 text-[12px] text-tertiary">{relativeTime(project.lastRunAt)}</p>
         </div>
       </div>
     </div>
@@ -146,7 +186,7 @@ function EmptyState({ onNew }: { onNew: () => void }) {
         <button
           type="button"
           onClick={onNew}
-          className="mt-5 rounded-xl bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
+          className="mt-5 rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
         >
           Create project
         </button>
@@ -273,7 +313,7 @@ function NewProjectSlideOver({
           <button
             type="submit"
             disabled={saving || !name.trim()}
-            className="w-full rounded-xl bg-brand py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="w-full rounded-xl bg-accent py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {saving ? "Creating..." : "Create project"}
           </button>

@@ -101,17 +101,19 @@ function reduce(s: LiveState, e: StreamEvent): LiveState {
 }
 
 export default function AssessmentRunner({
-  defaultTarget = DEFAULT_TARGET,
+  defaultTarget,
   defaultAppName = "DemoBank",
+  linkedPersonas = [],
   mode = "sequential",
 }: {
   defaultTarget?: string;
   defaultAppName?: string;
+  linkedPersonas?: { id: string; identity: { name: string; disabilities: string[] } }[];
   mode?: "sequential" | "parallel";
 }) {
   const [personas, setPersonas] = useState<PersonaOption[]>([]);
-  const [selected, setSelected] = useState<string[]>(["control", "oku_visual", "oku_motor"]);
-  const [target, setTarget] = useState(defaultTarget);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [target, setTarget] = useState(defaultTarget || "");
   const [appName, setAppName] = useState(defaultAppName);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,20 +121,33 @@ export default function AssessmentRunner({
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [showConfigError, setShowConfigError] = useState(!defaultTarget || linkedPersonas.length === 0);
   // After a run completes both views coexist; this toggles which one is shown so
   // the user can move back and forth between the live preview and the results.
   const [view, setView] = useState<"live" | "results">("live");
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    getPersonas().then(setPersonas).catch((e) => setError(String(e)));
+    getPersonas().then((allPersonas) => {
+      // Normalize: backend returns {id, identity:{name,...}} but UI expects {stem, name, disabilities}
+      const normalized = allPersonas.map((p) => ({
+        ...p,
+        stem: p.stem || (p as any).id || "",
+        name: p.name || (p as any).identity?.name || (p as any).id || "",
+        disabilities: p.disabilities || (p as any).identity?.disabilities || [],
+      }));
+      const linkedIds = new Set(linkedPersonas.map((p) => p.id));
+      const filtered = normalized.filter((p) => linkedIds.has(p.stem));
+      setPersonas(filtered);
+      setSelected(filtered.map((p) => p.stem));
+    }).catch((e) => setError(String(e)));
     return () => esRef.current?.close();
-  }, []);
+  }, [linkedPersonas]);
 
   const toggle = (stem: string) =>
     setSelected((s) => (s.includes(stem) ? s.filter((x) => x !== stem) : [...s, stem]));
 
-  const canRun = selected.length >= 3 && !!target && !loading; // FR-1.4: ≥3 personas
+  const canRun = selected.length >= 1 && !!target && !loading && !showConfigError;
 
   function run() {
     setLoading(true);
@@ -170,6 +185,31 @@ export default function AssessmentRunner({
 
   return (
     <div>
+      {showConfigError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="w-[480px] rounded-[20px] bg-card p-8 shadow-2xl">
+            <div className="flex items-start gap-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blocked/10">
+                <svg className="h-5 w-5 text-blocked" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="font-display text-[20px] text-primary">Configuration required</h3>
+                <div className="mt-3 space-y-2 text-[14px] text-secondary">
+                  {!defaultTarget && (
+                    <p>No staging URL configured for this project. Please add a staging URL in the project settings before running tests.</p>
+                  )}
+                  {linkedPersonas.length === 0 && (
+                    <p>No personas linked to this project. Please link at least 3 personas from the Personas tab before running tests.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Config ── */}
       <section className="rounded-card bg-card p-5 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -192,7 +232,7 @@ export default function AssessmentRunner({
         </div>
 
         <div className="mt-4">
-          <span className="section-label">Personas ({selected.length} selected — need ≥3)</span>
+          <span className="section-label">Personas ({selected.length} selected)</span>
           <div className="mt-2 flex flex-wrap gap-2">
             {personas.map((p) => {
               const on = selected.includes(p.stem);
@@ -204,7 +244,7 @@ export default function AssessmentRunner({
                   className={`rounded-full px-3 py-1.5 text-[13px] transition ${
                     on ? "bg-anchor text-on-dark" : "bg-field text-secondary hover:text-primary"
                   }`}
-                  title={p.disabilities.join(", ") || "no disability tags"}
+                  title={(p.disabilities || []).join(", ") || "no disability tags"}
                 >
                   {p.name}
                 </button>
