@@ -54,7 +54,7 @@ interface NodeCardItem {
   output?: Record<string, unknown>;
   screenshot_url?: string | null;
 }
-interface LiveState {
+export interface LiveState {
   runNodes: string[]; // run-scope nodes seen, in order (for the pipeline bar)
   log: NodeCardItem[]; // every node execution, with its output
   frames: Record<string, string>; // persona stem → latest live-browser JPEG (base64)
@@ -67,7 +67,7 @@ function push(s: LiveState, item: Omit<NodeCardItem, "id">): LiveState {
   return { ...s, n: s.n + 1, log: [...s.log, { id: s.n, ...item }] };
 }
 
-function reduce(s: LiveState, e: StreamEvent): LiveState {
+export function reduce(s: LiveState, e: StreamEvent): LiveState {
   if (e.type === "frame") {
     return { ...s, frames: { ...s.frames, [e.persona]: e.data } };
   }
@@ -422,7 +422,13 @@ function NodeOutputCard({ item }: { item: NodeCardItem }) {
   );
 }
 
-function LiveView({ live }: { live: LiveState }) {
+export function LiveView({
+  live,
+  personaInfoMap = {},
+}: {
+  live: LiveState;
+  personaInfoMap?: Record<string, { name: string; figurineUrl?: string }>;
+}) {
   const lastRunNode = live.runNodes[live.runNodes.length - 1];
 
   // Personas present in this run, in stream order. Persona-scope log items establish
@@ -473,8 +479,7 @@ function LiveView({ live }: { live: LiveState }) {
             key={p}
             persona={p}
             frame={live.frames[p]}
-            // Each column carries the shared run-scope nodes (init/aggregate/score/
-            // evidence/alerts) interleaved with this persona's own nodes, in stream order.
+            personaInfo={personaInfoMap[p]}
             items={live.log.filter(
               (it) => it.scope === "run" || (it.scope === "persona" && it.persona === p),
             )}
@@ -491,34 +496,60 @@ function PersonaColumn({
   persona,
   frame,
   items,
+  personaInfo,
 }: {
   persona: string;
   frame?: string;
   items: NodeCardItem[];
+  personaInfo?: { name: string; figurineUrl?: string };
 }) {
   const feedRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
   }, [items.length]);
 
+  const displayName = personaInfo?.name ?? persona;
+
   return (
     <div className="rounded-card bg-card p-3">
-      <h3 className="section-label mb-2">{persona}</h3>
-      <div className="overflow-hidden rounded-[20px] border-4 border-anchor bg-anchor">
-        {frame ? (
+      {/* Persona header */}
+      <div className="mb-3 flex items-center gap-2">
+        {personaInfo?.figurineUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={`data:image/jpeg;base64,${frame}`}
-            alt={`${persona} live browser`}
-            className="block w-full"
-          />
+          <img src={personaInfo.figurineUrl} alt={displayName} className="h-7 w-7 rounded-full object-cover shrink-0" />
         ) : (
-          <div className="flex h-[320px] items-center justify-center text-[12px] text-on-dark-dim">
-            launching browser…
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-anchor text-[11px] font-semibold text-on-dark">
+            {displayName.charAt(0).toUpperCase()}
           </div>
         )}
+        <span className="section-label truncate">{displayName}</span>
       </div>
-      <div ref={feedRef} className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
+
+      {/* Phone frame — CDP screencast renders here as it streams */}
+      <div className="mx-auto w-[148px]">
+        <div className="relative rounded-[28px] border-[6px] border-gray-900 bg-black shadow-xl">
+          {/* notch */}
+          <div className="absolute left-1/2 top-[6px] z-10 h-[10px] w-[40px] -translate-x-1/2 rounded-full bg-gray-900" />
+          <div className="overflow-hidden rounded-[22px]">
+            {frame ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={`data:image/jpeg;base64,${frame}`}
+                alt={`${displayName} live browser`}
+                className="block w-full"
+              />
+            ) : (
+              <div className="flex h-[288px] items-center justify-center bg-gray-950 text-[11px] text-gray-500">
+                launching browser…
+              </div>
+            )}
+          </div>
+        </div>
+        {/* home bar */}
+        <div className="mx-auto mt-2 h-[4px] w-[36px] rounded-full bg-gray-300" />
+      </div>
+
+      <div ref={feedRef} className="mt-3 max-h-[280px] space-y-2 overflow-y-auto pr-1">
         {items.length === 0 ? (
           <p className="text-[12px] text-tertiary">waiting for nodes…</p>
         ) : (

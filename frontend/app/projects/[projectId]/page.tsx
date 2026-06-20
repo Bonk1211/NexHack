@@ -19,6 +19,7 @@ import {
   deleteDemographic,
   suggestPersonas,
   createPersona,
+  updateProject,
 } from "@/lib/api";
 import { DonutChart, DEMO_PALETTE } from "@/components/DonutChart";
 import type { DemographicSegment, PersonaSuggestion } from "@/lib/types";
@@ -206,6 +207,10 @@ export default function ProjectDetailPage() {
             runs={runs}
             flowSteps={flowSteps}
             onEditFlow={() => setShowFlowEditor(true)}
+            onUpdateGoal={async (goal, successUrl) => {
+              const updated = await updateProject(projectId, { goal, successUrl });
+              setProject((prev) => prev ? { ...prev, ...updated } : prev);
+            }}
           />
         )}
         {tab === "dashboard" && (
@@ -263,14 +268,19 @@ function OverviewTab({
   runs,
   flowSteps,
   onEditFlow,
+  onUpdateGoal,
 }: {
   project: ProjectDetail;
   runs: RunSummary[];
   flowSteps: FlowStep[];
   onEditFlow: () => void;
+  onUpdateGoal: (goal: string, successUrl: string) => void;
 }) {
   const [segments, setSegments] = useState<DemographicSegment[]>([]);
   const [showAddDemo, setShowAddDemo] = useState(false);
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [goalDraft, setGoalDraft] = useState(project.goal || "");
+  const [successUrlDraft, setSuccessUrlDraft] = useState(project.successUrl || "");
 
   useEffect(() => {
     getDemographics(project.id).then(setSegments).catch(() => {});
@@ -285,6 +295,11 @@ function OverviewTab({
   async function handleDeleteDemo(demoId: string) {
     const updated = await deleteDemographic(project.id, demoId);
     setSegments(updated);
+  }
+
+  function handleSaveGoal() {
+    onUpdateGoal(goalDraft, successUrlDraft);
+    setEditingGoal(false);
   }
 
   const [latestCommit, setLatestCommit] = useState<{
@@ -362,6 +377,68 @@ function OverviewTab({
                   </a>
                 </div>
               )}
+              <div>
+                <div className="flex items-center justify-between">
+                  <div className="text-[12px] text-tertiary">Agent goal</div>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingGoal(true); setGoalDraft(project.goal || ""); setSuccessUrlDraft(project.successUrl || ""); }}
+                    className="text-[11px] text-brand hover:underline"
+                  >
+                    {project.goal ? "Edit" : "Set"}
+                  </button>
+                </div>
+                {editingGoal ? (
+                  <div className="mt-1 space-y-2">
+                    <textarea
+                      className="input min-h-[60px] text-[13px]"
+                      value={goalDraft}
+                      onChange={(e) => setGoalDraft(e.target.value)}
+                      placeholder="e.g. Sign up and reach the rewards page"
+                    />
+                    <input
+                      className="input text-[13px]"
+                      value={successUrlDraft}
+                      onChange={(e) => setSuccessUrlDraft(e.target.value)}
+                      placeholder="Success URL pattern, e.g. /rewards"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleSaveGoal}
+                        className="rounded-lg bg-brand px-3 py-1 text-[12px] font-medium text-white hover:opacity-90"
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingGoal(false)}
+                        className="rounded-lg px-3 py-1 text-[12px] text-secondary hover:text-primary"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-1">
+                    {project.goal ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="rounded-full bg-ok/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">Autonomous</span>
+                          <span className="text-[13px] text-secondary">{project.goal}</span>
+                        </div>
+                        {project.successUrl && (
+                          <div className="text-[11px] text-tertiary">
+                            Success: <code className="rounded bg-field px-1 py-0.5">{project.successUrl}</code>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="rounded-full bg-field px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary">Scripted</span>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1173,16 +1250,22 @@ function ScoreBlockChart({ trend }: { trend: ProjectDashboard["trend"] }) {
   const W = 320;
   const H = 96;
   const pad = 10;
+  const yAxisWidth = 30;
   const n = trend.length;
   const maxBlocked = Math.max(1, ...trend.map((t) => t.blockedCount));
-  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+  const x = (i: number) => yAxisWidth + (n <= 1 ? (W - yAxisWidth) / 2 : (i * (W - yAxisWidth - pad)) / (n - 1));
   const yScore = (s: number) => H - pad - s * (H - 2 * pad);
   const line = trend.map((t, i) => `${x(i)},${yScore(t.overallScore)}`).join(" ");
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full" preserveAspectRatio="none">
+      {/* Y-axis labels */}
+      <text x={0} y={pad + 4} fontSize={9} fill="#8e8e93">100%</text>
+      <text x={0} y={H / 2 + 3} fontSize={9} fill="#8e8e93">50%</text>
+      <text x={0} y={H - pad} fontSize={9} fill="#8e8e93">0%</text>
+      
       {trend.map((t, i) => {
         const bh = (t.blockedCount / maxBlocked) * (H - 2 * pad);
-        const bw = Math.min(18, (W - 2 * pad) / Math.max(n, 1) - 6);
+        const bw = Math.min(18, (W - yAxisWidth - pad) / Math.max(n, 1) - 6);
         return (
           <rect key={t.runId} x={x(i) - bw / 2} y={H - pad - bh} width={bw} height={bh} rx={2} fill="#c8362f" opacity={0.18} />
         );
@@ -1196,17 +1279,32 @@ function ScoreBlockChart({ trend }: { trend: ProjectDashboard["trend"] }) {
 }
 
 // Single-series line in a fixed [min,max] domain.
-function LineChart({ values, color, min = 0, max = 1 }: { values: number[]; color: string; min?: number; max?: number }) {
+function LineChart({ values, color, min = 0, max = 1, format = "auto" }: { values: number[]; color: string; min?: number; max?: number; format?: "auto" | "currency" | "percent" }) {
   const W = 320;
   const H = 96;
   const pad = 10;
+  const yAxisWidth = 30;
   const n = values.length;
   const span = max - min || 1;
-  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+  const x = (i: number) => yAxisWidth + (n <= 1 ? (W - yAxisWidth) / 2 : (i * (W - yAxisWidth - pad)) / (n - 1));
   const y = (v: number) => H - pad - ((v - min) / span) * (H - 2 * pad);
   const line = values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  
+  const formatLabel = (v: number) => {
+    if (format === "currency") return `$${v.toFixed(3)}`;
+    if (format === "percent") return `${Math.round(v * 100)}%`;
+    if (max <= 1) return `${Math.round(v * 100)}%`;
+    if (max < 10) return v.toFixed(1);
+    return Math.round(v).toString();
+  };
+  
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full" preserveAspectRatio="none">
+      {/* Y-axis labels */}
+      <text x={0} y={pad + 4} fontSize={9} fill="#8e8e93">{formatLabel(max)}</text>
+      <text x={0} y={H / 2 + 3} fontSize={9} fill="#8e8e93">{formatLabel((max + min) / 2)}</text>
+      <text x={0} y={H - pad} fontSize={9} fill="#8e8e93">{formatLabel(min)}</text>
+      
       <polyline points={line} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {values.map((v, i) => (
         <circle key={i} cx={x(i)} cy={y(v)} r={3} fill={color} />
@@ -1250,40 +1348,58 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
   const last = trend[trend.length - 1];
   const prev = trend.length >= 2 ? trend[trend.length - 2] : undefined;
   const openP0 = actions.filter((a) => a.severity === "P0").length;
+  const openP1 = actions.filter((a) => a.severity === "P1").length;
   const multiRun = trend.length >= 2;
+
+  // Calculate average P0/P1 per run
+  const p0PerRun = dashboard.runsCount > 0 ? openP0 / dashboard.runsCount : 0;
+  const p1PerRun = dashboard.runsCount > 0 ? openP1 / dashboard.runsCount : 0;
 
   return (
     <div className="space-y-8">
       {/* Row A — KPI cards */}
-      <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Inclusion score">
+      <div className="grid grid-cols-5 gap-4">
+        <KpiCard label="Avg inclusion score">
           <div className="flex items-end gap-2">
-            <span className="font-display text-[34px] leading-none tabular-nums text-primary">{scorePct(last.overallScore)}</span>
-            <Delta curr={last.overallScore} prev={prev?.overallScore} pct />
+            <span className="font-display text-[34px] leading-none tabular-nums text-primary">
+              {dashboard.avgInclusionScore != null ? scorePct(dashboard.avgInclusionScore) : "—"}
+            </span>
+            {multiRun && last && prev && <Delta curr={last.overallScore} prev={prev.overallScore} pct />}
           </div>
-          <div className="mt-1 text-[11px] text-tertiary">latest of {dashboard.runsCount} runs · DERIVED</div>
         </KpiCard>
 
-        <KpiCard label="WCAG pass rate">
+        <KpiCard label="Avg WCAG pass rate">
           <div className="flex items-end gap-2">
-            <span className="font-display text-[34px] leading-none tabular-nums text-primary">{scorePct(last.wcagPassRate)}%</span>
-            <Delta curr={last.wcagPassRate} prev={prev?.wcagPassRate} pct />
-          </div>
-          <div className="mt-1">
-            <span className="rounded-full bg-ok/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">Trusted</span>
+            <span className="font-display text-[34px] leading-none tabular-nums text-primary">
+              {trend.length > 0 ? `${Math.round(trend.reduce((sum, t) => sum + t.wcagPassRate, 0) / trend.length * 100)}%` : "—"}
+            </span>
+            {multiRun && last && prev && <Delta curr={last.wcagPassRate} prev={prev.wcagPassRate} pct />}
           </div>
         </KpiCard>
 
-        <KpiCard label="Open P0 blocks">
-          <span className={`font-display text-[34px] leading-none tabular-nums ${openP0 > 0 ? "text-blocked" : "text-ok"}`}>{openP0}</span>
-          <div className="mt-1 text-[11px] text-tertiary">{actions.length} open action{actions.length !== 1 ? "s" : ""}</div>
+        <KpiCard label="Avg blocked per run">
+          <span className={`font-display text-[34px] leading-none tabular-nums ${dashboard.avgBlockedPerRun > 0 ? "text-blocked" : "text-ok"}`}>
+            {dashboard.avgBlockedPerRun.toFixed(1)}
+          </span>
         </KpiCard>
 
-        <KpiCard label="LLM cost">
+        <KpiCard label="Avg cost per run">
           <div className="font-display text-[28px] leading-none tabular-nums text-primary">
-            {fmtCost(dashboard.totalCost, dashboard.currency, dashboard.pricingApplied)}
+            {fmtCost(dashboard.avgCostPerRun, dashboard.currency, dashboard.pricingApplied)}
           </div>
-          <div className="mt-1 text-[11px] text-tertiary">{fmtTokens(dashboard.totalTokens)} tokens · across runs</div>
+        </KpiCard>
+
+        <KpiCard label="Avg P0/P1 per run">
+          <div className="flex items-baseline gap-3">
+            <div>
+              <span className="font-display text-[28px] leading-none tabular-nums text-blocked">{p0PerRun.toFixed(1)}</span>
+              <span className="ml-1 text-[11px] text-tertiary">P0</span>
+            </div>
+            <div>
+              <span className="font-display text-[28px] leading-none tabular-nums text-friction">{p1PerRun.toFixed(1)}</span>
+              <span className="ml-1 text-[11px] text-tertiary">P1</span>
+            </div>
+          </div>
         </KpiCard>
       </div>
 
@@ -1296,7 +1412,7 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
             <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded-sm bg-blocked/20" /> blocked</span>
           </div>
         </ChartCard>
-        <ChartCard title="WCAG pass-rate trend" badge="Trusted" hasData={multiRun}>
+        <ChartCard title="WCAG pass-rate trend" hasData={multiRun}>
           <LineChart values={trend.map((t) => t.wcagPassRate)} color="#1d8a4e" />
         </ChartCard>
       </div>
@@ -1304,14 +1420,10 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
       {/* Row C — cost efficiency */}
       <div className="grid grid-cols-2 gap-4">
         <ChartCard title="Cost & tokens per run" hasData={multiRun}>
-          <LineChart values={trend.map((t) => t.cost)} color="#6b7280" min={0} max={Math.max(...trend.map((t) => t.cost), 0.0001)} />
-          <div className="mt-2 text-[11px] text-tertiary">
-            {trend.map((t) => fmtTokens(t.totalTokens)).join(" → ")} tokens/run
-          </div>
+          <LineChart values={trend.map((t) => t.cost)} color="#6b7280" min={0} max={Math.max(...trend.map((t) => t.cost), 0.0001)} format="currency" />
         </ChartCard>
         <div className="card p-5">
           <h3 className="text-[13px] font-semibold text-primary">Usage by model</h3>
-          <div className="mt-1 text-[11px] text-tertiary">DeepSeek V4 today · table survives a model swap</div>
           <table className="mt-3 w-full text-[12px]">
             <thead>
               <tr className="text-left text-tertiary">

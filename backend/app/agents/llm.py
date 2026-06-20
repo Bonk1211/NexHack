@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,17 @@ class VisionJudgment(BaseModel):
     fallback_target: str | None = Field(
         default=None, description="accessible name to try if the a11y locate failed"
     )
+
+
+class AgentAction(BaseModel):
+    """One autonomous navigation decision (goal-directed mode)."""
+    step_label: str = Field(description="concise label, e.g. 'entering phone number'")
+    action: str = Field(description="fill | click | done | blocked")
+    role: str = Field(default="", description="a11y role of target element")
+    name: str = Field(default="", description="exact accessible name from the tree")
+    value: str = Field(default="", description="text to type for fill, empty otherwise")
+    confusion: float = Field(default=0.0, ge=0.0, le=1.0)
+    reasoning: str = Field(default="", description="one sentence why this action")
 
 
 class SynthesisResult(BaseModel):
@@ -175,6 +187,132 @@ def vision_judge(
         # endpoint must not be silently indistinguishable from running offline.
         logger.warning("comprehend LLM call failed (%s: %s); using offline heuristic",
                        type(exc).__name__, exc)
+        return fallback
+
+
+# --- agent_decide (autonomous goal-directed navigation) ---------------------
+
+_AGENT_SYSTEM = (
+    "You are simulating a user persona navigating a mobile web app toward a specific goal. "
+    "You perceive the page only through its accessibility tree — exactly as a screen reader would. "
+    "Decide the single best NEXT action to take toward the goal. "
+    "Respond ONLY with a JSON object of exactly this shape: "
+    '{"step_label": "<concise label>", "action": "fill|click|done|blocked", '
+    '"role": "<a11y role>", "name": "<exact accessible name from tree>", '
+    '"value": "<text to type if fill, else empty>", '
+    '"confusion": <0.0-1.0>, "reasoning": "<one sentence>"}. '
+    'Use "done" if the goal is achieved or the success URL pattern is visible. '
+    'CRITICAL — use "blocked" ONLY when there are literally zero actionable elements on the page. '
+    'Confusing, misleading, or double-negative labels are NOT a reason to return "blocked" — '
+    'capture your confusion in the confusion score (0.7–1.0) and still choose an action. '
+    'BEFORE returning "blocked", you MUST check for a primary action button: any button whose '
+    'name contains Finish, Continue, Next, Submit, Done, Proceed, Confirm, OK, or Skip. '
+    'If such a button exists, click it — even if you cannot understand the surrounding content. '
+    'The "name" field must exactly match an accessible name visible in the tree. '
+    "confusion 0.0 = obvious next step, 1.0 = page is confusing but you are still acting. "
+    "NAVIGATION RULES: "
+    "1) When you see individual OTP digit fields labeled 'Digit 1', 'Digit 2' etc., "
+    "fill each one with the corresponding digit from the hint value (e.g. hint 'otp=1234' "
+    "→ fill Digit 1 with '1', Digit 2 with '2', etc.). If no OTP hint is provided, "
+    "look for a 'Skip for now' link or 'Verify' button and use it — do NOT re-type a "
+    "phone number into an OTP field. "
+    "2) Only return 'done' when the current URL actually matches the success URL pattern. "
+    "If you are not at the target page, keep navigating — 'done' on the wrong page is the "
+    "same as giving up."
+)
+
+# Deterministic CTA fallback: matches primary action buttons by name keyword.
+# Used to override an LLM "blocked" verdict when a clear forward path exists in the tree.
+_CTA_PATTERN = re.compile(
+    r'button "([^"]*(?:Finish|Continue|Next|Submit|Done|Proceed|Confirm|Okay|OK|Skip)[^"]*)"',
+    re.IGNORECASE,
+)
+
+
+def _find_cta(aria: str) -> "AgentAction | None":
+    """Scan the a11y tree for a primary CTA button. Returns an AgentAction or None."""
+    m = _CTA_PATTERN.search(aria)
+    if not m:
+        return None
+    name = m.group(1)
+    return AgentAction(
+        step_label=f"click primary CTA: {name}",
+        action="click",
+        role="button",
+        name=name,
+        value="",
+        confusion=0.8,  # high — page was confusing enough that LLM nearly blocked
+        reasoning=f"Deterministic CTA fallback: clicking '{name}' to proceed past confusing page",
+    )
+
+
+def agent_decide(
+    goal: str,
+    hints: dict,
+    success_url: str,
+    current_url: str,
+    aria_excerpt: str,
+    *,
+    requires_labels: bool,
+) -> AgentAction:
+    """Autonomous navigation: LLM decides next action toward goal from the a11y tree.
+
+    Falls back to a safe 'blocked' action on any failure so the run never crashes.
+    """
+    fallback = AgentAction(
+        step_label="navigation",
+        action="blocked",
+        reasoning="offline — no LLM key or call failed",
+    )
+    client = _client(settings.llm_model_step)
+    if client is None or not aria_excerpt:
+        return fallback
+
+    # Short-circuit: success URL already reached
+    if success_url and success_url.lstrip("/") in current_url:
+        return AgentAction(step_label="goal reached", action="done",
+                           reasoning=f"current URL {current_url} matches success_url")
+
+    hints_text = ", ".join(f"{k}={v}" for k, v in hints.items()) if hints else "none"
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        human = HumanMessage(content=(
+            f"Goal: {goal}\n"
+            f"Current URL: {current_url}\n"
+            f"Success URL pattern: {success_url or '(none — infer from goal)'}\n"
+            f"Persona depends on labels/screen-reader semantics: {requires_labels}\n"
+            f"Available hint values to use in form fields: {hints_text}\n\n"
+            f"Accessibility tree:\n{aria_excerpt[:3000]}\n\n"
+            "What is the next action? "
+            "Remember: if labels are confusing, set confusion high and still act. "
+            "Only return 'blocked' if NO buttons, links, or inputs exist on the page. "
+            "Respond in JSON."
+        ))
+        ai = client.invoke(
+            [SystemMessage(content=_AGENT_SYSTEM), human],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(model_name or settings.llm_model_step, prompt_tokens, completion_tokens)
+
+        payload = json.loads(_extract_text(ai.content))
+        action = AgentAction.model_validate(payload)
+
+        # Fix 2: deterministic CTA override — if LLM returned blocked but a primary
+        # action button exists in the tree, click it instead of giving up.
+        if action.action == "blocked":
+            cta = _find_cta(aria_excerpt)
+            if cta:
+                logger.info("agent_decide: overriding 'blocked' with CTA fallback '%s'", cta.name)
+                return cta
+
+        return action
+    except Exception as exc:
+        logger.warning("agent_decide failed (%s: %s); returning blocked", type(exc).__name__, exc)
         return fallback
 
 

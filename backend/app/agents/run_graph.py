@@ -81,8 +81,9 @@ def init(state: RunState) -> dict:
 def fan_out(state: RunState) -> list[Send]:
     """Map: one Send per persona. seed+i keeps personas distinct yet reproducible."""
     sends: list[Send] = []
+    autonomous = bool(state.get("autonomous"))
     for i, persona in enumerate(state["personas"]):
-        name = persona["stem"]   # the persona file stem ("control", "oku_visual") = identity
+        name = persona["stem"]
         payload: PersonaInput = {
             "persona": name,
             "persona_idx": i,
@@ -90,12 +91,16 @@ def fan_out(state: RunState) -> list[Send]:
             "requires_labels": _requires_labels(persona),
             "thresholds": thresholds_for(persona),
             "target_url": state["target_url"],
-            "flow": state["flow"],
+            "flow": state.get("flow") or [],
             "viewport": state.get("viewport", "iPhone 13"),
             "seed": state["seed"] + i,
             "artifact_dir": (
                 f"{state['artifact_root']}/{name}" if state.get("artifact_root") else None
             ),
+            "autonomous": autonomous,
+            "goal": state.get("goal", ""),
+            "hints": state.get("hints") or {},
+            "success_url": state.get("success_url", ""),
         }
         sends.append(Send("persona", payload))
     return sends
@@ -112,6 +117,7 @@ def persona_node(payload: PersonaInput) -> dict:
         "shots": final["shots"],
         "status": final.get("status"),
         "blocked_at": final.get("blocked_at"),
+        "blocked_url": final.get("blocked_url"),   # browser address where persona got stuck
     }
     return {"persona_results": [raw]}
 
@@ -140,6 +146,11 @@ def evidence(state: RunState) -> dict:
     """Assemble the §13 pack + attach the optional once-per-run synthesis."""
     pack = build_pack(state["app"], state["run_at"], state["scored"])
     pack["screenshots"] = {raw["persona"]: raw["shots"] for raw in state["ordered"]}
+
+    # Attach blocked_url (browser address at block) to each persona entry in the pack.
+    blocked_urls = {raw["persona"]: raw.get("blocked_url") for raw in state["ordered"]}
+    for p in pack["personas"]:
+        p["blocked_url"] = blocked_urls.get(p["persona"])
 
     # §14 empathy-replay refs per persona: lenses (from disability tags) + ordered
     # frames keyed to the captured screenshots. Storage upload upgrades the local
@@ -198,24 +209,34 @@ def run_assessment(
     seed: int = 1337,
     artifact_root: str | None = None,
     run_id: str | None = None,
+    # Autonomous mode — pass instead of flow when goal-directed navigation is wanted.
+    autonomous: bool = False,
+    goal: str = "",
+    hints: dict | None = None,
+    success_url: str = "",
 ) -> dict:
     """Run one assessment across personas via the map-reduce graph; return the pack.
 
     Checkpointed by `thread_id=run_id` so a re-invocation resumes uncompleted
     personas. Persists run-level RAW results only (page/rng stay in-process).
+
+    Pass `autonomous=True` + `goal` + `hints` for goal-directed exploration.
+    Pass `flow` for the traditional scripted mode (default: DEFAULT_FLOW).
     """
-    # Carry the file stem as the persona identity (the matrix/pack key, §17),
-    # matching the pre-graph orchestrator contract.
     personas = [{**load_persona(name), "stem": name} for name in persona_names]
     init_state: RunState = {
         "app": app_name,
         "target_url": target_url,
         "viewport": "iPhone 13",
         "personas": personas,
-        "flow": flow if flow is not None else DEFAULT_FLOW,
+        "flow": flow if flow is not None else ([] if autonomous else DEFAULT_FLOW),
         "seed": seed,
         "artifact_root": artifact_root,
         "persona_results": [],
+        "autonomous": autonomous,
+        "goal": goal,
+        "hints": hints or {},
+        "success_url": success_url,
     }
 
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer

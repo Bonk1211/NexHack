@@ -403,14 +403,29 @@ def aggregate_dashboard(
     actions.sort(key=lambda a: (_sev_rank.get(a["severity"], 9),
                                 _neg_str(run_created.get(a["runId"], ""))))
 
+    # Calculate aggregated metrics
+    runs_count = len(runs_rows)
+    scores = [float(r.get("inclusion_score") or 0) for r in runs_rows if r.get("inclusion_score") is not None]
+    total_blocked = sum(blocked_per_run.values())
+    
+    avg_tokens_per_run = total_tokens / runs_count if runs_count else 0
+    avg_cost_per_run = total_cost / runs_count if runs_count else 0
+    avg_inclusion_score = sum(scores) / len(scores) if scores else None
+    avg_blocked_per_run = total_blocked / runs_count if runs_count else 0
+
     return {
         "projectId": project_id,
-        "runsCount": len(runs_rows),
+        "runsCount": runs_count,
         "latestScore": float(latest["inclusion_score"]) if latest and latest.get("inclusion_score") is not None else None,
         "totalTokens": total_tokens,
         "totalCost": total_cost,
         "currency": currency,
         "pricingApplied": pricing_applied,
+        # Aggregated metrics
+        "avgTokensPerRun": round(avg_tokens_per_run, 2),
+        "avgCostPerRun": round(avg_cost_per_run, 6),
+        "avgInclusionScore": round(avg_inclusion_score, 4) if avg_inclusion_score is not None else None,
+        "avgBlockedPerRun": round(avg_blocked_per_run, 2),
         "trend": trend,
         "personaReliability": persona_reliability,
         "usageByModel": usage_by_model,
@@ -432,6 +447,7 @@ def fetch_project_dashboard(app_id: str) -> dict:
     empty = {
         "projectId": app_id, "runsCount": 0, "latestScore": None,
         "totalTokens": 0, "totalCost": 0.0, "currency": "USD", "pricingApplied": False,
+        "avgTokensPerRun": 0, "avgCostPerRun": 0.0, "avgInclusionScore": None, "avgBlockedPerRun": 0,
         "trend": [], "personaReliability": [], "usageByModel": [], "actions": [],
     }
     if not _has_creds():
@@ -661,6 +677,8 @@ def _app_to_dict(app: dict, personas: list, latest_run: dict | None) -> dict:
         "description": app.get("description"),
         "stagingUrl": app.get("staging_url"),
         "repoUrl": app.get("repo_url"),
+        "goal": app.get("goal"),
+        "successUrl": app.get("success_url"),
         "personaCount": len(personas),
         "latestScore": float(latest_run["inclusion_score"]) if latest_run and latest_run.get("inclusion_score") is not None else None,
         "lastRunAt": latest_run.get("created_at") if latest_run else None,
@@ -703,7 +721,7 @@ def update_app(app_id: str, patch: dict) -> dict | None:
         return None
     from app.db import get_client
     client = get_client()
-    col_map = {"description": "description"}
+    col_map = {"description": "description", "goal": "goal", "successUrl": "success_url"}
     db_patch = {col_map[k]: v for k, v in patch.items() if k in col_map}
     if not db_patch:
         return get_app(app_id)

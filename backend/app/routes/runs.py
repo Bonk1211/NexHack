@@ -45,35 +45,63 @@ _STORE: dict[str, dict] = {}
 _ARTIFACTS = pathlib.Path(settings.artifacts_dir).resolve()
 
 
-def _resolve_flow(app_name: str) -> list[FlowStep]:
-    """Look up custom flow steps for an app; fall back to DEFAULT_FLOW."""
+def _resolve_flow(app_name: str) -> dict:
+    """Look up flow config for an app; returns a dict with mode + config.
+
+    Return shape:
+      {"autonomous": False, "flow": [...]}          — scripted mode
+      {"autonomous": True, "goal": ..., "hints": ..., "success_url": ...}  — goal-directed
+
+    Priority:
+      1. goal column → autonomous mode (ignore flow_steps for agent execution)
+      2. flow_steps as list → scripted mode
+      3. empty / absent → DEFAULT_FLOW scripted fallback
+    """
     try:
         from app.db import get_client
         client = get_client()
-        apps = client.table("apps").select("id, flow_steps").eq("name", app_name).limit(1).execute().data or []
+        apps = client.table("apps").select("id, goal, success_url, flow_steps").eq("name", app_name).limit(1).execute().data or []
         if not apps:
             logger.info("_resolve_flow: no app found for '%s', using DEFAULT_FLOW", app_name)
-            return DEFAULT_FLOW
-        raw = apps[0].get("flow_steps") or []
+            return {"autonomous": False, "flow": DEFAULT_FLOW}
+        
+        app = apps[0]
+        goal = app.get("goal")
+        
+        # Priority 1: goal column → autonomous mode
+        if goal:
+            success_url = app.get("success_url") or ""
+            logger.info("_resolve_flow: app '%s' using autonomous mode, goal='%s', success_url='%s'", app_name, goal, success_url)
+            return {
+                "autonomous": True,
+                "goal": goal,
+                "hints": {},
+                "success_url": success_url,
+                "flow": [],
+            }
+        
+        # Priority 2: flow_steps as list → scripted mode
+        raw = app.get("flow_steps") or []
         if not raw:
-            logger.info("_resolve_flow: app '%s' has no flow_steps, using DEFAULT_FLOW", app_name)
-            return DEFAULT_FLOW
+            logger.info("_resolve_flow: app '%s' has no goal or flow_steps, using DEFAULT_FLOW", app_name)
+            return {"autonomous": False, "flow": DEFAULT_FLOW}
+
         flow = [
             FlowStep(
                 key=s.get("key", ""),
                 action=s.get("action", "click"),
                 role=s.get("role", ""),
                 name=s.get("name", ""),
-                value=s.get("value", "000000"),
+                value=s.get("value", ""),
                 critical=s.get("critical", False),
             )
             for s in raw
         ]
         logger.info("_resolve_flow: app '%s' using %d custom steps: %s", app_name, len(flow), [s.key for s in flow])
-        return flow
+        return {"autonomous": False, "flow": flow}
     except Exception:
         logger.warning("_resolve_flow: DB error for '%s', using DEFAULT_FLOW", app_name, exc_info=True)
-        return DEFAULT_FLOW
+        return {"autonomous": False, "flow": DEFAULT_FLOW}
 
 
 class StartRunRequest(BaseModel):
@@ -146,6 +174,8 @@ def create_app(req: CreateAppRequest) -> dict:
 
 class UpdateAppRequest(BaseModel):
     description: str | None = None
+    goal: str | None = None
+    successUrl: str | None = None
 
 
 @router.patch("/apps/{app_id}")
@@ -265,16 +295,20 @@ def start_run(req: StartRunRequest) -> dict:
     # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
     # (returns the existing pack), neither re-runs nor duplicates personas.
     run_id = req.run_id or str(uuid.uuid4())
-    flow = _resolve_flow(req.app_name)
+    flow_cfg = _resolve_flow(req.app_name)
     with track_usage() as tracker:
         pack = orchestrator.run_assessment(
             app_name=req.app_name,
             target_url=req.target_url,
             persona_names=req.persona_names,
-            flow=flow,
+            flow=flow_cfg.get("flow") or None,
             seed=req.seed,
             run_id=run_id,
-            artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
+            artifact_root=str(_ARTIFACTS / run_id),
+            autonomous=flow_cfg.get("autonomous", False),
+            goal=flow_cfg.get("goal", ""),
+            hints=flow_cfg.get("hints") or {},
+            success_url=flow_cfg.get("success_url", ""),
         )
 
         # Serialize usage first so it persists onto the run row (dashboard §3.2).
@@ -361,6 +395,7 @@ def stream_run(
                 set_tracker(tracker)
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
+                flow_cfg = _resolve_flow(app_name)
                 payload = {
                     "persona": name,
                     "persona_idx": i,
@@ -368,10 +403,14 @@ def stream_run(
                     "requires_labels": _requires_labels(cfg),
                     "thresholds": thresholds,
                     "target_url": target_url,
-                    "flow": _resolve_flow(app_name),
-                    "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
-                    "seed": seed + i,                 # §16 deterministic per persona
-                    "artifact_dir": str(root / name),  # FR-1.3 screenshot every step
+                    "flow": flow_cfg.get("flow") or [],
+                    "viewport": "iPhone 13",
+                    "seed": seed + i,
+                    "artifact_dir": str(root / name),
+                    "autonomous": flow_cfg.get("autonomous", False),
+                    "goal": flow_cfg.get("goal", ""),
+                    "hints": flow_cfg.get("hints") or {},
+                    "success_url": flow_cfg.get("success_url", ""),
                 }
                 q.put({"type": "persona_start", "persona": name, "idx": i,
                        "label": cfg.get("name", name)})
@@ -417,7 +456,8 @@ def stream_run(
                 res = PersonaRunResult(name, tuple(steps), thresholds, score(steps, thresholds))
                 v = res.result.persona_verdict
                 q.put({"type": "persona_done", "persona": name, "verdict": v.verdict,
-                       "severity": v.severity, "blocked_at": v.blocked_at})
+                       "severity": v.severity, "blocked_at": v.blocked_at,
+                       "blocked_url": payload.get("blocked_url")})
                 return res, shots
 
             # Run personas concurrently (own browser each) or one at a time. Either way

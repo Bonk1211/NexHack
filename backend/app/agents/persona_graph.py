@@ -34,7 +34,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy
 from playwright.sync_api import sync_playwright
 
-from app.agents.llm import vision_judge
+from app.agents.llm import agent_decide, vision_judge
 from app.agents.navigator import (
     FlowStep,
     JourneyResult,
@@ -81,18 +81,49 @@ def observe(state: PersonaState) -> dict:
         shot = str(d / f"step_{idx}.png")
         page.screenshot(path=shot)
     out["current_shot"] = shot
+
+    # Track current URL and visit count for autonomous stuck detection.
+    current_url = page.url
+    counts = dict(state.get("url_visit_counts") or {})
+    counts[current_url] = counts.get(current_url, 0) + 1
+    out["current_url"] = current_url
+    out["url_visit_counts"] = counts
     return out
 
 
 def comprehend(state: PersonaState) -> dict:
-    """The one LLM node: per-screen confusion judgment + nav fallback (stream B)."""
+    """The one LLM node: per-screen confusion judgment + nav fallback (stream B).
+
+    In autonomous mode: calls agent_decide to produce the next action from the a11y
+    tree and goal context. In scripted mode: calls vision_judge as before.
+    """
+    aria = state.get("aria", "")
+    requires_labels = state.get("requires_labels", False)
+
+    if state.get("autonomous"):
+        action = agent_decide(
+            goal=state.get("goal", ""),
+            hints=state.get("hints") or {},
+            success_url=state.get("success_url", ""),
+            current_url=state.get("current_url", ""),
+            aria_excerpt=aria,
+            requires_labels=requires_labels,
+        )
+        return {
+            "last_action": action.model_dump(),
+            "last_confusion": action.confusion,
+            "last_reason": action.reasoning,
+            "last_fallback": None,
+            "current_labeled": True,
+        }
+
     fs: FlowStep = state["flow"][state["step_idx"]]
-    labeled = _role_has_name(state.get("aria", ""), fs.role) if fs.role else True
+    labeled = _role_has_name(aria, fs.role) if fs.role else True
     j = vision_judge(
         state.get("current_shot"),
         fs.key,
-        state.get("aria", ""),
-        requires_labels=state.get("requires_labels", False),
+        aria,
+        requires_labels=requires_labels,
         labeled=labeled,
         action=fs.action,
     )
@@ -110,10 +141,13 @@ def decide(state: PersonaState) -> dict:
     Dwell is reading-load × persona pace × seeded hesitation; the give-up
     threshold and the label dependency decide whether the step blocks BEFORE we
     even act. Same screen, different persona => different decision.
+
+    In autonomous mode: label_block is skipped (agent targets named elements), but
+    dwell and give-up still apply. Stuck detection (same URL ≥4 visits) overrides
+    give-up to force an exit when the agent is looping.
     """
     bp = _bp(state)
     rng: random.Random = state["rng"]
-    fs: FlowStep = state["flow"][state["step_idx"]]
 
     wpm = float(bp.get("reading_speed_wpm", 200))
     dwell_mult = float(bp.get("dwell_multiplier", 1.0))
@@ -125,8 +159,22 @@ def decide(state: PersonaState) -> dict:
     if rng.random() < hesitation_prob:
         dwell *= 1.5
 
+    if state.get("autonomous"):
+        # Stuck detection: same URL visited 4+ times → force give-up.
+        url_visit_counts = state.get("url_visit_counts") or {}
+        current_url = state.get("current_url", "")
+        stuck = url_visit_counts.get(current_url, 0) >= 10
+        action_str = (state.get("last_action") or {}).get("action", "")
+        give_up = stuck or dwell >= giveup_s or action_str == "blocked"
+        return {
+            "current_dwell": round(dwell, 2),
+            "current_retries": 0,
+            "current_label_block": False,
+            "current_give_up": give_up,
+        }
+
+    fs: FlowStep = state["flow"][state["step_idx"]]
     labeled = state.get("current_labeled", True)
-    # Persona depends on labels/SR semantics and the field is unlabeled => label-block.
     label_block = fs.action == "fill" and state.get("requires_labels", False) and not labeled
     give_up = dwell >= giveup_s
     retries = 1 if rng.random() < hesitation_prob else 0
@@ -145,10 +193,14 @@ def act(state: PersonaState) -> dict:
     A persona that cannot proceed exits with dead_end/completed=False — that is a
     finding (a P0 once scored), NOT an error to retry away (§23). Only genuinely
     unexpected exceptions propagate to the node RetryPolicy (transient).
+
+    In autonomous mode: executes the AgentAction decided by comprehend, using the
+    accessible name to locate the element precisely (no .first ambiguity).
+    In scripted mode: follows FlowStep — now also uses name for fill disambiguation
+    (Track A fix: previously ignored name on fill, causing wrong-field overwrites).
     """
     page = state["page"]
     idx = state["step_idx"]
-    fs: FlowStep = state["flow"][idx]
     rng: random.Random = state["rng"]
 
     dwell = state.get("current_dwell", 0.0)
@@ -156,28 +208,87 @@ def act(state: PersonaState) -> dict:
     dead_end = False
     completed = True
     confusion = state.get("last_confusion", 0.0)
+    blocked_url: str | None = None
 
     if state.get("current_label_block"):
         dead_end, completed = True, False
-    elif fs.action in ("fill", "click"):
-        try:
-            if fs.action == "fill":
-                page.get_by_role(fs.role).first.fill(fs.value, timeout=3000)
-            elif fs.name:
-                page.get_by_role(fs.role, name=fs.name).first.click(timeout=3000)
+
+    elif state.get("autonomous"):
+        action = state.get("last_action") or {}
+        a_type = action.get("action", "blocked")
+        role = action.get("role", "")
+        name = action.get("name", "")
+        value = action.get("value", "")
+
+        if a_type == "done":
+            # Guard: only accept "done" when actually at the success URL.
+            success_url = state.get("success_url", "")
+            current_url = state.get("current_url", "")
+            if success_url and success_url.lstrip("/") not in current_url:
+                # LLM claimed "done" prematurely — not at target. Force blocked.
+                dead_end, completed = True, False
             else:
-                page.get_by_role(fs.role).first.click(timeout=3000)
-        except Exception:
-            # a11y locate / interaction failure => the persona is blocked here.
+                completed = True
+        elif a_type == "blocked" or state.get("current_give_up"):
+            dead_end, completed = True, False
+        elif a_type in ("fill", "click"):
+            try:
+                loc = page.get_by_role(role, name=name) if name else page.get_by_role(role)
+                if a_type == "fill":
+                    loc.first.fill(value, timeout=3000)
+                else:
+                    loc.first.click(timeout=3000)
+            except Exception:
+                # Name fallback: only for fill actions (first textbox is safe).
+                # Click fallback is dangerous — clicking the first button on a page
+                # can submit forms before they're ready (e.g. OTP Verify before digits).
+                if name and a_type == "fill":
+                    try:
+                        page.get_by_role(role).first.fill(value, timeout=3000)
+                    except Exception:
+                        dead_end, completed = True, False
+                else:
+                    dead_end, completed = True, False
+        else:
             dead_end, completed = True, False
 
-    if state.get("current_give_up"):
-        dead_end, completed = True, False
+        step_key = action.get("step_label", f"step_{idx}")
+        critical = False  # autonomous steps are not pre-classified
+
+    else:
+        fs: FlowStep = state["flow"][idx]
+        step_key = fs.key
+        critical = fs.critical
+
+        if fs.action in ("fill", "click"):
+            try:
+                if fs.action == "fill":
+                    loc = page.get_by_role(fs.role, name=fs.name) if fs.name else page.get_by_role(fs.role)
+                    loc.first.fill(fs.value, timeout=3000)
+                elif fs.name:
+                    page.get_by_role(fs.role, name=fs.name).first.click(timeout=3000)
+                else:
+                    page.get_by_role(fs.role).first.click(timeout=3000)
+            except Exception:
+                # Name fallback: only for fill actions. Click fallback is dangerous.
+                if fs.name and fs.action == "fill":
+                    try:
+                        page.get_by_role(fs.role).first.fill(fs.value, timeout=3000)
+                    except Exception:
+                        dead_end, completed = True, False
+                else:
+                    dead_end, completed = True, False
+
+        if state.get("current_give_up"):
+            dead_end, completed = True, False
+
+    if dead_end:
+        blocked_url = page.url
 
     step = StepSignals(
         step_idx=idx,
-        step_key=fs.key,
-        critical=fs.critical,
+        step_key=step_key,
+        critical=critical if not state.get("autonomous") else False,
         wcag=state.get("wcag", ()) if idx == 0 else (),
         dwell_s=dwell,
         retries=retries,
@@ -188,21 +299,36 @@ def act(state: PersonaState) -> dict:
     )
 
     next_idx = idx + 1
+    flow = state.get("flow") or []
     if dead_end:
-        status, blocked_at = "blocked", fs.key
-    elif next_idx >= len(state["flow"]):
-        status, blocked_at = "completed", None
+        status, blocked_at = "blocked", step_key
+    elif state.get("autonomous"):
+        # Only exit the loop when the LLM explicitly says "done" or a dead_end
+        # occurs. Every other successful action keeps the agent running.
+        action = state.get("last_action") or {}
+        a_type = action.get("action", "")
+        if a_type == "done":
+            status, blocked_at = "completed", None
+        elif a_type == "blocked":
+            status, blocked_at = "blocked", step_key
+        else:
+            status, blocked_at = "running", None
+    elif next_idx >= len(flow):
+        status = "completed" if completed else "blocked"
+        blocked_at = None if completed else step_key
     else:
         status, blocked_at = "running", None
 
-    _ = rng  # rng already consumed in decide; kept in state for determinism
-    return {
+    _ = rng
+    out = {
         "steps": [step],
         "shots": [state.get("current_shot")],
         "step_idx": next_idx,
         "status": status,
         "blocked_at": blocked_at,
+        "blocked_url": blocked_url,
     }
+    return out
 
 
 def route_next(state: PersonaState) -> str:

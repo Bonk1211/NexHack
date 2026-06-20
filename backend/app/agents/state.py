@@ -45,6 +45,11 @@ class PersonaInput(TypedDict, total=False):
     viewport: str
     seed: int                        # per-persona seed+i — determinism under Send concurrency
     artifact_dir: Optional[str]
+    # Autonomous (goal-directed) navigation — mutually exclusive with a non-empty flow.
+    autonomous: bool                 # True = agent decides actions; False = follow flow
+    goal: str                        # e.g. "claim a reward on BrewPoints"
+    hints: dict                      # values agent must use: {"phone": "...", "otp": "..."}
+    success_url: str                 # URL suffix that means goal achieved, e.g. "/rewards"
 
 
 class PersonaState(PersonaInput, total=False):
@@ -80,9 +85,15 @@ class PersonaState(PersonaInput, total=False):
     last_fallback: Optional[str]
     last_reason: str
 
+    # Autonomous mode scratch
+    current_url: str                 # page.url captured each observe cycle
+    url_visit_counts: dict           # {url: int} — stuck detection
+    last_action: dict                # AgentAction dict from agent_decide
+
     # Control-flow status read by route_next ("running"|"blocked"|"completed")
     status: str
     blocked_at: Optional[str]
+    blocked_url: Optional[str]       # browser address where the persona got stuck
 
 
 class PersonaRunRaw(TypedDict):
@@ -110,6 +121,11 @@ class RunState(TypedDict, total=False):
     seed: int
     artifact_root: Optional[str]
     run_at: str                      # ISO-8601, set by init
+    # Autonomous navigation config (present when flow is empty)
+    autonomous: bool
+    goal: str
+    hints: dict
+    success_url: str
 
     # Fan-in reducer: each Send-spawned persona subgraph contributes one entry
     persona_results: Annotated[list[PersonaRunRaw], operator.add]
