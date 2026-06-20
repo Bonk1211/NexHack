@@ -7,7 +7,9 @@ persistence (app.repository) is invoked best-effort and never blocks the respons
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import logging
 import os
 import pathlib
 import queue
@@ -30,6 +32,8 @@ from app.evidence.pack import PersonaRunResult, build_pack, build_replay
 from app.scoring.engine import score
 from app.scoring.personas import load_library, load_persona, thresholds_for
 from app.llm_usage import current_tracker, set_tracker, track_usage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -77,6 +81,28 @@ def _serve_screenshots(pack: dict) -> None:
             frame["screenshot_url"] = _to_served_url(frame.get("screenshot_url"))
 
 
+@router.get("")
+def list_runs(app_name: str | None = None) -> list[dict]:
+    """Run listing.
+
+    With `app_name`: persisted run history for that app (newest first), from
+    Supabase — backs the run-history tab; returns [] when persistence is off.
+    Without it: the in-memory runs produced in this process (legacy/session view).
+    """
+    if app_name:
+        return repository.list_runs(app_name)
+
+    response = []
+    for rid, payload in _STORE.items():
+        pack = payload.get("pack") if isinstance(payload, dict) and "pack" in payload else payload
+        if not isinstance(pack, dict):
+            continue
+        response.append(
+            {"run_id": rid, "app": pack.get("app"), "inclusion_score": pack.get("inclusion_score")}
+        )
+    return response
+
+
 @router.post("")
 def start_run(req: StartRunRequest) -> dict:
     # run_id doubles as the run graph's checkpointer thread_id. A client may pass an
@@ -96,11 +122,14 @@ def start_run(req: StartRunRequest) -> dict:
         # Serialize usage first so it persists onto the run row (dashboard §3.2).
         usage = tracker.serialized()
 
-        # Best-effort persistence — swallow DB errors so the demo path never breaks.
+        # Best-effort persistence — log DB errors so failures are visible, but never
+        # block the demo path. Pass the real run_id so history links back to this run.
         try:
-            repository.persist_run(pack, usage)
+            repository.persist_run(
+                pack, run_id=run_id, mode="sequential", target_url=req.target_url, usage=usage
+            )
         except Exception:
-            pass
+            logger.warning("persist_run failed for run %s", run_id, exc_info=True)
 
         # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
         _serve_screenshots(pack)
@@ -133,15 +162,19 @@ def stream_run(
     persona_names: str,
     seed: int = 1337,
     run_id: str | None = None,
+    mode: str = "sequential",
 ) -> StreamingResponse:
     """SSE: run the assessment and stream every graph node as it executes (§8/§20).
 
-    `persona_names` is comma-separated (EventSource is GET-only). Personas run
-    SEQUENTIALLY (§20 narration); each persona subgraph node (observe→comprehend→
-    decide→act) is emitted the moment it completes, carrying the screenshot the agent
-    just captured — so the client watches the agent test the target app step by step.
+    `persona_names` is comma-separated (EventSource is GET-only). `mode` selects
+    `sequential` (personas run one after another, §20 narration) or `parallel`
+    (all personas drive their own browser concurrently). Either way each persona
+    subgraph node (observe→comprehend→decide→act) is emitted the moment it completes,
+    carrying the screenshot the agent just captured, tagged with its persona so the
+    client can route it to the right column.
     """
     names = [n for n in persona_names.split(",") if n]
+    parallel = mode == "parallel"
     rid = run_id or str(uuid.uuid4())
     root = _ARTIFACTS / rid
 
@@ -159,10 +192,15 @@ def stream_run(
         try:
             set_tracker(tracker)
             q.put({"type": "node", "scope": "run", "node": "init", "personas": names})
-            results: list[PersonaRunResult] = []
-            shots_map: dict[str, list] = {}
 
-            for i, name in enumerate(names):
+            def run_one(i: int, name: str) -> tuple[PersonaRunResult, list]:
+                """Drive one persona end-to-end, emitting its nodes onto `q`.
+
+                Returns its scored result and screenshots. When run on a persona
+                thread (parallel mode) the usage tracker is thread-local, so re-bind
+                it here; in sequential mode this is a harmless no-op.
+                """
+                set_tracker(tracker)
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
                 payload = {
@@ -219,11 +257,25 @@ def stream_run(
                                "screenshot_url": _to_served_url(shot)})
 
                 res = PersonaRunResult(name, tuple(steps), thresholds, score(steps, thresholds))
-                results.append(res)
-                shots_map[name] = shots
                 v = res.result.persona_verdict
                 q.put({"type": "persona_done", "persona": name, "verdict": v.verdict,
                        "severity": v.severity, "blocked_at": v.blocked_at})
+                return res, shots
+
+            # Run personas concurrently (own browser each) or one at a time. Either way
+            # assemble results in submission order so downstream scoring is deterministic.
+            per_persona: dict[str, tuple[PersonaRunResult, list]] = {}
+            if parallel and len(names) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(names)) as ex:
+                    futures = {ex.submit(run_one, i, name): name for i, name in enumerate(names)}
+                    for fut in concurrent.futures.as_completed(futures):
+                        per_persona[futures[fut]] = fut.result()
+            else:
+                for i, name in enumerate(names):
+                    per_persona[name] = run_one(i, name)
+
+            results: list[PersonaRunResult] = [per_persona[name][0] for name in names]
+            shots_map: dict[str, list] = {name: per_persona[name][1] for name in names}
 
             # Reduce → score → evidence (the run-graph tail, narrated as nodes w/ output).
             q.put({"type": "node", "scope": "run", "node": "aggregate",
@@ -259,9 +311,11 @@ def stream_run(
             # Serialize usage first so it persists onto the run row (dashboard §3.2).
             usage = tracker.serialized()
             try:
-                repository.persist_run(pack, usage)
+                repository.persist_run(
+                    pack, run_id=rid, mode=mode, target_url=target_url, usage=usage
+                )
             except Exception:
-                pass
+                logger.warning("persist_run failed for run %s", rid, exc_info=True)
             _serve_screenshots(pack)
             q.put({"type": "node", "scope": "run", "node": "alerts",
                    "output": {"p0_alerts": len([p for p in pack["personas"]
@@ -310,29 +364,20 @@ def list_personas() -> list[dict]:
     ]
 
 
-@router.get("")
-def list_runs() -> list[dict]:
-    response = []
-    for rid, payload in _STORE.items():
-        pack = payload.get("pack") if isinstance(payload, dict) and "pack" in payload else payload
-        if not isinstance(pack, dict):
-            continue
-        response.append({
-            "run_id": rid,
-            "app": pack.get("app"),
-            "inclusion_score": pack.get("inclusion_score"),
-        })
-    return response
-
-
 @router.get("/{run_id}")
 def get_run(run_id: str) -> dict:
+    """Single run for the detail page: in-memory first (this session), then the
+    Supabase-persisted pack so historical runs from run history open too."""
     payload = _STORE.get(run_id)
-    if payload is None:
+    if payload is not None:
+        if isinstance(payload, dict) and "pack" in payload:
+            return {"pack": payload["pack"], "usage": payload.get("usage")}
+        return payload
+
+    pack = repository.get_run(run_id)
+    if pack is None:
         raise HTTPException(status_code=404, detail="run not found")
-    if isinstance(payload, dict) and "pack" in payload:
-        return {"pack": payload["pack"], "usage": payload.get("usage")}
-    return payload
+    return {"pack": pack, "usage": None}
 
 
 def _safe_slug(text: str) -> str:

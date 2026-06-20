@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -12,6 +12,7 @@ import {
   linkPersona,
   unlinkPersona,
 } from "@/lib/api";
+import { listRuns, type RunHistoryItem } from "@/lib/live";
 import type {
   ProjectDetail,
   RunSummary,
@@ -19,6 +20,18 @@ import type {
   RunMode,
   ProjectDashboard,
 } from "@/lib/types";
+
+// Map a Supabase-backed run-history row to the UI's RunSummary shape.
+function toRunSummary(projectId: string, r: RunHistoryItem): RunSummary {
+  return {
+    id: r.id,
+    projectId,
+    mode: (r.mode as RunMode) ?? "sequential",
+    createdAt: r.created_at,
+    overallScore: r.inclusion_score ?? 0,
+    blockedCount: r.blocked_count,
+  };
+}
 import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
@@ -44,6 +57,18 @@ export default function ProjectDetailPage() {
   const [showRunner, setShowRunner] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [showPersonaModal, setShowPersonaModal] = useState(false);
+  // Fixture runs, kept as a fallback for when Supabase has no real runs yet.
+  const fixtureRunsRef = useRef<RunSummary[]>([]);
+
+  // Prefer Supabase-persisted runs (keyed by app name); fall back to fixtures.
+  async function loadRuns(appName: string, fallback: RunSummary[]) {
+    try {
+      const live = await listRuns(appName);
+      setRuns(live.length ? live.map((r) => toRunSummary(projectId, r)) : fallback);
+    } catch {
+      setRuns(fallback);
+    }
+  }
 
   useEffect(() => {
     Promise.all([
@@ -51,19 +76,27 @@ export default function ProjectDetailPage() {
       getProjectRuns(projectId),
       getPersonas(),
       getProjectDashboard(projectId),
-    ]).then(([p, r, personas, dash]) => {
+    ]).then(async ([p, r, personas, dash]) => {
       setProject(p);
-      setRuns(r);
       setAllPersonas(personas);
       setDashboard(dash);
+      fixtureRunsRef.current = r;
+      await loadRuns(p.name, r);
       setLoading(false);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner.
+  // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner
+  // in the runs tab, directly above run history.
   function handleStartRun() {
     setShowRunner(true);
-    setTab("overview");
+    setTab("runs");
+  }
+
+  // Pull in any newly persisted run (e.g. after hiding the runner post-assessment).
+  function refreshRuns() {
+    if (project) loadRuns(project.name, fixtureRunsRef.current);
   }
 
   if (loading) {
@@ -152,21 +185,6 @@ export default function ProjectDetailPage() {
       </div>
 
       <div className="px-10 py-8">
-        {showRunner && tab === "overview" && (
-          <div className="mb-8">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="section-label">Acceptance test — live agent run</h2>
-              <button
-                type="button"
-                onClick={() => setShowRunner(false)}
-                className="text-[12px] text-secondary hover:text-primary"
-              >
-                Hide
-              </button>
-            </div>
-            <AssessmentRunner defaultAppName={project.name} />
-          </div>
-        )}
         {tab === "overview" && (
           <OverviewTab project={project} personaNames={personaNames} />
         )}
@@ -183,7 +201,19 @@ export default function ProjectDetailPage() {
             }}
           />
         )}
-        {tab === "runs" && <RunsTab runs={runs} projectId={projectId} />}
+        {tab === "runs" && (
+          <RunsTab
+            runs={runs}
+            projectId={projectId}
+            showRunner={showRunner}
+            onHide={() => {
+              setShowRunner(false);
+              refreshRuns();
+            }}
+            appName={project.name}
+            mode={runMode}
+          />
+        )}
       </div>
     </div>
   );
@@ -403,9 +433,38 @@ function AddPersonaModal({
   );
 }
 
-function RunsTab({ runs, projectId }: { runs: RunSummary[]; projectId: string }) {
+function RunsTab({
+  runs,
+  projectId,
+  showRunner,
+  onHide,
+  appName,
+  mode,
+}: {
+  runs: RunSummary[];
+  projectId: string;
+  showRunner: boolean;
+  onHide: () => void;
+  appName: string;
+  mode: RunMode;
+}) {
   return (
     <div>
+      {showRunner && (
+        <div className="mb-8">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="section-label">Acceptance test — live agent run</h2>
+            <button
+              type="button"
+              onClick={onHide}
+              className="text-[12px] text-secondary hover:text-primary"
+            >
+              Hide
+            </button>
+          </div>
+          <AssessmentRunner defaultAppName={appName} mode={mode} />
+        </div>
+      )}
       <h2 className="section-label">Run history</h2>
       <div className="mt-5">
         {runs.length === 0 ? (

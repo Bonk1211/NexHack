@@ -7,7 +7,8 @@ import {
   mediaUrl,
   type PersonaOption,
   type Pack,
-  type ReplayFrame,
+  type ReplayClip,
+  type PersonaResult,
   type StreamEvent,
   type UsageSummary,
 } from "@/lib/live";
@@ -56,7 +57,7 @@ interface NodeCardItem {
 interface LiveState {
   runNodes: string[]; // run-scope nodes seen, in order (for the pipeline bar)
   log: NodeCardItem[]; // every node execution, with its output
-  frame?: { persona: string; data: string }; // latest live-browser JPEG (base64)
+  frames: Record<string, string>; // persona stem → latest live-browser JPEG (base64)
   n: number; // monotonic id source
 }
 
@@ -68,7 +69,7 @@ function push(s: LiveState, item: Omit<NodeCardItem, "id">): LiveState {
 
 function reduce(s: LiveState, e: StreamEvent): LiveState {
   if (e.type === "frame") {
-    return { ...s, frame: { persona: e.persona, data: e.data } };
+    return { ...s, frames: { ...s.frames, [e.persona]: e.data } };
   }
   if (e.type === "node" && e.scope === "run") {
     const runNodes = s.runNodes.includes(e.node) ? s.runNodes : [...s.runNodes, e.node];
@@ -102,9 +103,11 @@ function reduce(s: LiveState, e: StreamEvent): LiveState {
 export default function AssessmentRunner({
   defaultTarget = DEFAULT_TARGET,
   defaultAppName = "DemoBank",
+  mode = "sequential",
 }: {
   defaultTarget?: string;
   defaultAppName?: string;
+  mode?: "sequential" | "parallel";
 }) {
   const [personas, setPersonas] = useState<PersonaOption[]>([]);
   const [selected, setSelected] = useState<string[]>(["control", "oku_visual", "oku_motor"]);
@@ -116,6 +119,9 @@ export default function AssessmentRunner({
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  // After a run completes both views coexist; this toggles which one is shown so
+  // the user can move back and forth between the live preview and the results.
+  const [view, setView] = useState<"live" | "results">("live");
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -132,10 +138,11 @@ export default function AssessmentRunner({
     setLoading(true);
     setError(null);
     setPack(null);
-    setLive({ runNodes: [], log: [], n: 1 });
+    setLive({ runNodes: [], log: [], frames: {}, n: 1 });
     setUsage(null);
+    setView("live");
     esRef.current?.close();
-    esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected }, (e) => {
+    esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected, mode }, (e) => {
       if (e.type === "usage") {
         setUsage(e.summary);
         return;
@@ -144,7 +151,8 @@ export default function AssessmentRunner({
         setPack(e.pack);
         setRunId(e.run_id);
         if (e.usage) setUsage(e.usage);
-        setLive(null);
+        // Keep `live` so the preview stays available; surface the results view.
+        setView("results");
         setLoading(false);
         esRef.current?.close();
         return;
@@ -217,8 +225,26 @@ export default function AssessmentRunner({
         {usage && <UsageTicker usage={usage} live={!!live} />}
       </section>
 
-      {live && <LiveView live={live} />}
-      {pack && <Results pack={pack} runId={runId} usage={usage} />}
+      {/* Once a run finishes, both views coexist — switch between them freely. */}
+      {pack && (
+        <div className="mt-6 inline-flex items-center gap-1 rounded-lg bg-field p-1">
+          {(["live", "results"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className={`rounded-md px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
+                view === v ? "bg-card text-primary shadow-sm" : "text-secondary hover:text-primary"
+              }`}
+            >
+              {v === "live" ? "Live preview" : "Results"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {live && (!pack || view === "live") && <LiveView live={live} />}
+      {pack && view === "results" && <Results pack={pack} runId={runId} usage={usage} />}
     </div>
   );
 }
@@ -335,6 +361,11 @@ function NodeOutputCard({ item }: { item: NodeCardItem }) {
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${dot}`} />
           <span className="font-mono text-[12px] text-primary">{title}</span>
+          {item.scope === "run" && (
+            <span className="rounded-full bg-field px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-tertiary">
+              shared
+            </span>
+          )}
         </div>
         {entries.length > 0 && (
           <dl className="mt-1.5 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">
@@ -353,82 +384,112 @@ function NodeOutputCard({ item }: { item: NodeCardItem }) {
 
 function LiveView({ live }: { live: LiveState }) {
   const lastRunNode = live.runNodes[live.runNodes.length - 1];
-  const feedRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [live.log.length]);
+
+  // Personas present in this run, in stream order. Persona-scope log items establish
+  // the order; any persona that has only streamed a frame so far is appended.
+  const personas: string[] = [];
+  for (const item of live.log) {
+    if (item.scope === "persona" && item.persona && !personas.includes(item.persona)) {
+      personas.push(item.persona);
+    }
+  }
+  for (const p of Object.keys(live.frames)) {
+    if (!personas.includes(p)) personas.push(p);
+  }
 
   return (
-    <section className="mt-8">
-      <div className="grid gap-6 md:grid-cols-[300px_1fr]">
-        {/* Live browser — the external app the agent is driving (CDP screencast) */}
-        <div>
-          <h2 className="section-label mb-2">Live browser</h2>
-          <div className="overflow-hidden rounded-[28px] border-4 border-anchor bg-anchor">
-            {live.frame ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={`data:image/jpeg;base64,${live.frame.data}`}
-                alt="live agent browser"
-                className="block w-full"
-              />
-            ) : (
-              <div className="flex h-[560px] items-center justify-center text-[12px] text-on-dark-dim">
-                launching browser…
-              </div>
+    <section className="mt-8 space-y-4">
+      {/* Run pipeline bar — run-scope nodes, shared across all personas (rendered once) */}
+      <div>
+        <h2 className="section-label mb-2">Graph nodes</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {RUN_PIPELINE.map((n, i) => {
+            const seen = live.runNodes.includes(n);
+            const active = lastRunNode === n && n !== "alerts";
+            return (
+              <span key={n} className="flex items-center gap-2">
+                <span
+                  className={`rounded-full px-3 py-1 text-[12px] ${
+                    active
+                      ? "bg-brand text-white animate-pulse"
+                      : seen
+                        ? "bg-anchor text-on-dark"
+                        : "bg-field text-tertiary"
+                  }`}
+                >
+                  {n}
+                </span>
+                {i < RUN_PIPELINE.length - 1 && <span className="text-tertiary">→</span>}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* One column per persona — own live browser + own node-reasoning feed (no mixing) */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {personas.map((p) => (
+          <PersonaColumn
+            key={p}
+            persona={p}
+            frame={live.frames[p]}
+            // Each column carries the shared run-scope nodes (init/aggregate/score/
+            // evidence/alerts) interleaved with this persona's own nodes, in stream order.
+            items={live.log.filter(
+              (it) => it.scope === "run" || (it.scope === "persona" && it.persona === p),
             )}
-          </div>
-          {live.frame && (
-            <p className="mt-2 text-center text-[12px] text-tertiary">
-              {live.frame.persona} · iPhone 13 viewport
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-4">
-          {/* Run pipeline bar */}
-          <div>
-            <h2 className="section-label mb-2">Graph nodes</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              {RUN_PIPELINE.map((n, i) => {
-                const seen = live.runNodes.includes(n);
-                const active = lastRunNode === n && n !== "alerts";
-                return (
-                  <span key={n} className="flex items-center gap-2">
-                    <span
-                      className={`rounded-full px-3 py-1 text-[12px] ${
-                        active
-                          ? "bg-brand text-white animate-pulse"
-                          : seen
-                            ? "bg-anchor text-on-dark"
-                            : "bg-field text-tertiary"
-                      }`}
-                    >
-                      {n}
-                    </span>
-                    {i < RUN_PIPELINE.length - 1 && <span className="text-tertiary">→</span>}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Per-node output feed (one card per node execution) */}
-          <div>
-            <h2 className="section-label mb-2">Node outputs</h2>
-            <div ref={feedRef} className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
-              {live.log.map((item) => (
-                <NodeOutputCard key={item.id} item={item} />
-              ))}
-            </div>
-          </div>
-        </div>
+          />
+        ))}
       </div>
     </section>
   );
 }
 
-function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
+// One persona's live lane: its CDP screencast frame above its own node feed. Each
+// column owns its scroll ref so feeds autoscroll independently.
+function PersonaColumn({
+  persona,
+  frame,
+  items,
+}: {
+  persona: string;
+  frame?: string;
+  items: NodeCardItem[];
+}) {
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+  }, [items.length]);
+
+  return (
+    <div className="rounded-card bg-card p-3">
+      <h3 className="section-label mb-2">{persona}</h3>
+      <div className="overflow-hidden rounded-[20px] border-4 border-anchor bg-anchor">
+        {frame ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={`data:image/jpeg;base64,${frame}`}
+            alt={`${persona} live browser`}
+            className="block w-full"
+          />
+        ) : (
+          <div className="flex h-[320px] items-center justify-center text-[12px] text-on-dark-dim">
+            launching browser…
+          </div>
+        )}
+      </div>
+      <div ref={feedRef} className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
+        {items.length === 0 ? (
+          <p className="text-[12px] text-tertiary">waiting for nodes…</p>
+        ) : (
+          items.map((item) => <NodeOutputCard key={item.id} item={item} />)
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
   return (
     <section className="mt-8 space-y-8">
       {/* Score + synthesis */}
@@ -509,30 +570,18 @@ function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usa
         </div>
       </div>
 
-      {/* Empathy replay — the screen through each persona's lens (§14) */}
+      {/* Empathy replay — one card per persona: an NLP summary of the friction they
+          hit, with the screenshots collapsed into an expandable, slideable carousel. */}
       <div>
         <h2 className="section-label mb-2">Empathy replay</h2>
-        <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Object.entries(pack.replay).map(([persona, clip]) => (
-            <div key={persona} className="rounded-card bg-card p-4">
-              <div className="flex items-center gap-2">
-                <span className="font-display text-[15px] text-primary">{persona}</span>
-                {clip.lenses.length > 0 ? (
-                  clip.lenses.map((l) => (
-                    <span key={l} className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">
-                      {l}
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-[11px] text-tertiary">baseline (no lens)</span>
-                )}
-              </div>
-              <div className="mt-3 flex gap-4 overflow-x-auto pb-2">
-                {clip.frames.map((f) => (
-                  <Frame key={f.step_idx} frame={f} lenses={clip.lenses} />
-                ))}
-              </div>
-            </div>
+            <ReplayCard
+              key={persona}
+              persona={persona}
+              clip={clip}
+              result={pack.personas.find((p) => p.persona === persona)}
+            />
           ))}
         </div>
       </div>
@@ -542,29 +591,121 @@ function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usa
   );
 }
 
-function Frame({ frame, lenses }: { frame: ReplayFrame; lenses: string[] }) {
-  const filter = lenses.map((l) => LENS_FILTER[l]).filter((x) => x && x !== "none").join(" ");
-  const src = mediaUrl(frame.screenshot_url);
+// Compose a one-line, natural-language account of what this persona ran into,
+// derived from their verdict plus the per-frame friction captions.
+function replaySummary(clip: ReplayClip, result?: PersonaResult): string {
+  const problems = clip.frames.filter((f) => f.status === "red" || f.status === "amber");
+  if (result?.verdict === "blocked") {
+    const where = result.blocked_at ? ` at “${result.blocked_at}”` : "";
+    const sev = result.severity ? ` (${result.severity})` : "";
+    const red = clip.frames.find((f) => f.status === "red");
+    const why = red && red.caption !== "ok" ? ` — ${red.caption}` : "";
+    return `Blocked${where}${sev}${why}.`;
+  }
+  if (problems.length > 0) {
+    const first = problems[0];
+    const detail = first.caption !== "ok" ? `: ${first.caption}` : "";
+    return `Completed with friction on ${problems.length} step${problems.length > 1 ? "s" : ""} — first at “${first.step_key}”${detail}.`;
+  }
+  return "Completed the whole flow with no friction flagged.";
+}
+
+function ReplayCard({
+  persona,
+  clip,
+  result,
+}: {
+  persona: string;
+  clip: ReplayClip;
+  result?: PersonaResult;
+}) {
+  const [open, setOpen] = useState(false);
+  const [idx, setIdx] = useState(0);
+  const n = clip.frames.length;
+  const blocked = result?.verdict === "blocked";
+  const filter = clip.lenses.map((l) => LENS_FILTER[l]).filter((x) => x && x !== "none").join(" ");
+
+  const cur = n > 0 ? clip.frames[Math.min(idx, n - 1)] : undefined;
+  const src = cur ? mediaUrl(cur.screenshot_url) : null;
+  const go = (d: number) => setIdx((i) => (i + d + n) % n);
+
   return (
-    <div className="w-[180px] shrink-0">
-      <div className="overflow-hidden rounded-lg border border-hairline bg-field">
-        {src ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={src}
-            alt={`${frame.step_key} as seen`}
-            className="h-[300px] w-full object-cover object-top"
-            style={{ filter: filter || undefined }}
-          />
+    <div className={`rounded-card p-4 ${blocked ? "bg-tint-blocked border-l-[3px] border-blocked" : "bg-card"}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-display text-[15px] text-primary">{persona}</span>
+        {clip.lenses.length > 0 ? (
+          clip.lenses.map((l) => (
+            <span key={l} className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">{l}</span>
+          ))
         ) : (
-          <div className="flex h-[300px] items-center justify-center text-[12px] text-tertiary">no frame</div>
+          <span className="text-[11px] text-tertiary">baseline (no lens)</span>
         )}
       </div>
-      <div className={`mt-1.5 flex items-center gap-1.5 text-[12px] ${STATUS_COLOR[frame.status]}`}>
-        <span className={`h-2 w-2 rounded-full ${STATUS_DOT[frame.status]}`} />
-        {frame.step_key}
-      </div>
-      <div className="text-[12px] text-secondary">{frame.caption}</div>
+
+      {/* NLP summary — always visible, the space-saving default */}
+      <p className={`mt-2 text-[13px] leading-relaxed ${blocked ? "font-medium text-blocked" : "text-secondary"}`}>
+        {replaySummary(clip, result)}
+      </p>
+      {result && result.wcag_failures.length > 0 && (
+        <p className="mt-1 text-[12px] text-tertiary">WCAG: {result.wcag_failures.join(", ")}</p>
+      )}
+
+      {n > 0 && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="mt-3 text-[12px] font-medium text-brand hover:underline"
+        >
+          {open ? "Hide screenshots" : `Show ${n} screenshot${n > 1 ? "s" : ""}`}
+        </button>
+      )}
+
+      {/* Slideable carousel — one frame at a time, revealed on demand */}
+      {open && cur && (
+        <div className="mt-3">
+          <div className="relative overflow-hidden rounded-lg border border-hairline bg-field">
+            {src ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={src}
+                alt={`${cur.step_key} as ${persona} saw it`}
+                className="h-[320px] w-full object-cover object-top"
+                style={{ filter: filter || undefined }}
+              />
+            ) : (
+              <div className="flex h-[320px] items-center justify-center text-[12px] text-tertiary">no frame</div>
+            )}
+            {n > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => go(-1)}
+                  aria-label="Previous screenshot"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-anchor/70 px-2.5 py-1 text-[14px] text-on-dark hover:bg-anchor"
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  onClick={() => go(1)}
+                  aria-label="Next screenshot"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-anchor/70 px-2.5 py-1 text-[14px] text-on-dark hover:bg-anchor"
+                >
+                  ›
+                </button>
+                <span className="absolute bottom-2 right-2 rounded-full bg-anchor/70 px-2 py-0.5 text-[11px] text-on-dark">
+                  {Math.min(idx, n - 1) + 1} / {n}
+                </span>
+              </>
+            )}
+          </div>
+          <div className={`mt-1.5 flex items-center gap-1.5 text-[12px] ${STATUS_COLOR[cur.status]}`}>
+            <span className={`h-2 w-2 rounded-full ${STATUS_DOT[cur.status]}`} />
+            {cur.step_key}
+          </div>
+          <div className="text-[12px] text-secondary">{cur.caption}</div>
+        </div>
+      )}
     </div>
   );
 }

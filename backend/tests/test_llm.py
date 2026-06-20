@@ -54,23 +54,27 @@ def test_synthesize_offline_template_names_blocked(monkeypatch):
 
 # --- online path via a fake client ------------------------------------------
 
-class _FakeStructured:
-    def __init__(self, result):
-        self._result = result
+class _FakeAIMessage:
+    """Mirrors a LangChain AIMessage: `.content` is the model's JSON text."""
 
-    def invoke(self, _messages):
-        return self._result
+    def __init__(self, content):
+        self.content = content
+        self.usage_metadata = {"input_tokens": 10, "output_tokens": 5}
 
 
 class _FakeClient:
+    """Matches the current llm.py path: `.invoke(messages, config=...)` returns a
+    message whose `.content` is the JSON the model produced (parsed by the caller)."""
+
     def __init__(self, result=None, raises=False):
         self._result = result
         self._raises = raises
 
-    def with_structured_output(self, _schema, **_kw):
+    def invoke(self, _messages, config=None):
         if self._raises:
             raise RuntimeError("deepseek down")
-        return _FakeStructured(self._result)
+        content = self._result.model_dump_json() if self._result is not None else "{}"
+        return _FakeAIMessage(content)
 
 
 def test_vision_structured_value_flows_through(monkeypatch):
