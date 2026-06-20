@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import os
 import pathlib
 import queue
@@ -31,6 +32,8 @@ from app.evidence.pack import PersonaRunResult, build_pack, build_replay
 from app.scoring.engine import score
 from app.scoring.personas import load_library, load_persona, thresholds_for
 from app.llm_usage import current_tracker, set_tracker, track_usage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -78,6 +81,28 @@ def _serve_screenshots(pack: dict) -> None:
             frame["screenshot_url"] = _to_served_url(frame.get("screenshot_url"))
 
 
+@router.get("")
+def list_runs(app_name: str | None = None) -> list[dict]:
+    """Run listing.
+
+    With `app_name`: persisted run history for that app (newest first), from
+    Supabase — backs the run-history tab; returns [] when persistence is off.
+    Without it: the in-memory runs produced in this process (legacy/session view).
+    """
+    if app_name:
+        return repository.list_runs(app_name)
+
+    response = []
+    for rid, payload in _STORE.items():
+        pack = payload.get("pack") if isinstance(payload, dict) and "pack" in payload else payload
+        if not isinstance(pack, dict):
+            continue
+        response.append(
+            {"run_id": rid, "app": pack.get("app"), "inclusion_score": pack.get("inclusion_score")}
+        )
+    return response
+
+
 @router.post("")
 def start_run(req: StartRunRequest) -> dict:
     # run_id doubles as the run graph's checkpointer thread_id. A client may pass an
@@ -94,11 +119,12 @@ def start_run(req: StartRunRequest) -> dict:
             artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
         )
 
-        # Best-effort persistence — swallow DB errors so the demo path never breaks.
+        # Best-effort persistence — log DB errors so failures are visible, but never
+        # block the demo path. Pass the real run_id so history links back to this run.
         try:
-            repository.persist_run(pack)
+            repository.persist_run(pack, run_id=run_id, mode="sequential", target_url=req.target_url)
         except Exception:
-            pass
+            logger.warning("persist_run failed for run %s", run_id, exc_info=True)
 
         # Make any remaining LOCAL screenshot paths loadable by the browser (dev, no Storage).
         _serve_screenshots(pack)
@@ -279,9 +305,11 @@ def stream_run(
                               "rollup": pack["synthesis"].get("rollup")}})
 
             try:
-                repository.persist_run(pack)
+                repository.persist_run(
+                    pack, run_id=rid, mode=mode, target_url=target_url
+                )
             except Exception:
-                pass
+                logger.warning("persist_run failed for run %s", rid, exc_info=True)
             _serve_screenshots(pack)
             q.put({"type": "node", "scope": "run", "node": "alerts",
                    "output": {"p0_alerts": len([p for p in pack["personas"]
@@ -331,29 +359,20 @@ def list_personas() -> list[dict]:
     ]
 
 
-@router.get("")
-def list_runs() -> list[dict]:
-    response = []
-    for rid, payload in _STORE.items():
-        pack = payload.get("pack") if isinstance(payload, dict) and "pack" in payload else payload
-        if not isinstance(pack, dict):
-            continue
-        response.append({
-            "run_id": rid,
-            "app": pack.get("app"),
-            "inclusion_score": pack.get("inclusion_score"),
-        })
-    return response
-
-
 @router.get("/{run_id}")
 def get_run(run_id: str) -> dict:
+    """Single run for the detail page: in-memory first (this session), then the
+    Supabase-persisted pack so historical runs from run history open too."""
     payload = _STORE.get(run_id)
-    if payload is None:
+    if payload is not None:
+        if isinstance(payload, dict) and "pack" in payload:
+            return {"pack": payload["pack"], "usage": payload.get("usage")}
+        return payload
+
+    pack = repository.get_run(run_id)
+    if pack is None:
         raise HTTPException(status_code=404, detail="run not found")
-    if isinstance(payload, dict) and "pack" in payload:
-        return {"pack": payload["pack"], "usage": payload.get("usage")}
-    return payload
+    return {"pack": pack, "usage": None}
 
 
 def _safe_slug(text: str) -> str:

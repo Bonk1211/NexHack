@@ -19,6 +19,10 @@ class _FakeTable:
         self.sink.setdefault(self.name, []).append(row)
         return self
 
+    def upsert(self, row):
+        self.sink.setdefault(self.name, []).append(row)
+        return self
+
     def execute(self):
         return None
 
@@ -29,6 +33,48 @@ class _FakeClient:
 
     def table(self, name):
         return _FakeTable(name, self.sink)
+
+
+class _QueryResult:
+    def __init__(self, data):
+        self.data = data
+
+
+class _ReadTable:
+    """Minimal PostgREST-style query chain over pre-seeded rows (read path)."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, col, val):
+        self._rows = [r for r in self._rows if r.get(col) == val]
+        return self
+
+    def in_(self, col, vals):
+        self._rows = [r for r in self._rows if r.get(col) in vals]
+        return self
+
+    def order(self, col, desc=False):
+        self._rows = sorted(self._rows, key=lambda r: r.get(col), reverse=desc)
+        return self
+
+    def limit(self, n):
+        self._rows = self._rows[:n]
+        return self
+
+    def execute(self):
+        return _QueryResult(list(self._rows))
+
+
+class _ReadClient:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def table(self, name):
+        return _ReadTable(self.tables.get(name, []))
 
 
 def _pack_with_steps():
@@ -61,6 +107,31 @@ def test_persist_writes_trusted_and_indicative_per_step(monkeypatch):
     assert otp["backtracked"] is False
     assert otp["dwell_ms"] == 12000
     assert otp["screenshot_url"] == "/tmp/otp.png"
+
+
+def test_persist_records_run_history_with_app_fk_and_mode(monkeypatch):
+    """Every run must land in `runs` — with the app_id FK satisfied (via an apps
+    upsert), the caller's run_id, and the actual mode — or history is incomplete."""
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    sink: dict[str, list] = {}
+    monkeypatch.setattr(db, "get_client", lambda: _FakeClient(sink))
+
+    rid = repository.persist_run(
+        _pack_with_steps(), run_id="run-123", mode="parallel", target_url="https://staging.demo"
+    )
+    assert rid == "run-123"
+
+    # apps upserted so the runs.app_id FK resolves; same id reused on re-run.
+    app = sink["apps"][0]
+    assert app["name"] == "DemoBank" and app["staging_url"] == "https://staging.demo"
+
+    run = sink["runs"][0]
+    assert run["id"] == "run-123"
+    assert run["app_id"] == app["id"]          # FK satisfied → row actually inserts
+    assert run["mode"] == "parallel"           # real mode, not hardcoded
+    assert run["status"] == "done"
+    assert run["inclusion_score"] is not None
 
 
 def test_persist_uploads_artifacts_and_persists_urls(monkeypatch):
@@ -112,3 +183,55 @@ def test_persist_is_noop_without_creds(monkeypatch):
     monkeypatch.setattr(db, "get_client", _boom)
     run_id = repository.persist_run(_pack_with_steps())
     assert isinstance(run_id, str) and len(run_id) > 0
+
+
+def test_list_runs_returns_app_runs_newest_first_with_blocked_counts(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    app_id = repository._app_id_for("DemoBank")
+    tables = {
+        "runs": [
+            {"id": "r1", "app_id": app_id, "mode": "parallel", "status": "done",
+             "inclusion_score": 0.8, "created_at": "2026-06-20T10:00:00Z"},
+            {"id": "r2", "app_id": app_id, "mode": "sequential", "status": "done",
+             "inclusion_score": 0.6, "created_at": "2026-06-20T09:00:00Z"},
+            {"id": "rX", "app_id": "other-app", "mode": "sequential", "status": "done",
+             "inclusion_score": 0.5, "created_at": "2026-06-20T11:00:00Z"},
+        ],
+        "run_personas": [
+            {"run_id": "r1", "verdict": "completed"},
+            {"run_id": "r2", "verdict": "blocked"},
+            {"run_id": "r2", "verdict": "blocked"},
+        ],
+    }
+    monkeypatch.setattr(db, "get_client", lambda: _ReadClient(tables))
+
+    out = repository.list_runs("DemoBank")
+
+    assert [r["id"] for r in out] == ["r1", "r2"]    # other app excluded; newest first
+    assert out[0]["mode"] == "parallel"
+    assert out[0]["blocked_count"] == 0
+    assert out[1]["blocked_count"] == 2
+
+
+def test_list_runs_empty_without_creds(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "")
+    monkeypatch.setattr(repository.settings, "supabase_key", "")
+    assert repository.list_runs("DemoBank") == []
+
+
+def test_get_run_returns_persisted_pack(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "https://x.supabase.co")
+    monkeypatch.setattr(repository.settings, "supabase_key", "key")
+    pack = {"app": "DemoBank", "inclusion_score": 0.42, "personas": []}
+    tables = {"evidence_packs": [{"run_id": "run-1", "pack": pack}, {"run_id": "run-2", "pack": {}}]}
+    monkeypatch.setattr(db, "get_client", lambda: _ReadClient(tables))
+
+    assert repository.get_run("run-1") == pack
+    assert repository.get_run("missing") is None
+
+
+def test_get_run_none_without_creds(monkeypatch):
+    monkeypatch.setattr(repository.settings, "supabase_url", "")
+    monkeypatch.setattr(repository.settings, "supabase_key", "")
+    assert repository.get_run("run-1") is None

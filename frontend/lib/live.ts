@@ -84,6 +84,31 @@ export interface UsageSummary {
   models: UsageModelBreakdown[];
 }
 
+export interface RunHistoryItem {
+  id: string;
+  mode: string | null;
+  status: string | null;
+  inclusion_score: number | null;
+  created_at: string;
+  blocked_count: number;
+}
+
+/** Run history for an app (newest first), persisted in Supabase (FR-1 §17). */
+export async function listRuns(appName: string): Promise<RunHistoryItem[]> {
+  const res = await fetch(`${BASE_URL}/runs?app_name=${encodeURIComponent(appName)}`);
+  if (!res.ok) throw new Error(`GET /runs failed: ${res.status}`);
+  return res.json();
+}
+
+/** Full evidence pack for one run (in-memory this session, else Supabase-persisted). */
+export async function getRunPack(
+  runId: string,
+): Promise<{ pack: Pack; usage: UsageSummary | null }> {
+  const res = await fetch(`${BASE_URL}/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(`GET /runs/${runId} failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getPersonas(): Promise<PersonaOption[]> {
   const res = await fetch(`${BASE_URL}/personas`);
   if (!res.ok) throw new Error(`GET /personas failed: ${res.status}`);

@@ -9,6 +9,7 @@ module never requires network.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from app.config import settings
 
@@ -17,14 +18,97 @@ def _has_creds() -> bool:
     return bool(settings.supabase_url and settings.supabase_key)
 
 
-def persist_run(pack: dict) -> str:
-    """Persist an evidence pack and return its run_id.
+def _app_id_for(name: str) -> str:
+    """Stable app id derived from the app name, so re-runs map to one apps row."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"inclusionscope:app:{name}"))
 
-    No-op (returns a fresh uuid) when Supabase is unconfigured. The route layer
-    calls this best-effort and swallows DB errors, so a persistence failure never
-    blocks returning the pack to the caller.
+
+def list_runs(app_name: str, limit: int = 50) -> list[dict]:
+    """Run history for one app, newest first, for the run-history tab.
+
+    Returns [] when Supabase is unconfigured (dev path stays DB-free). Each item:
+    id, mode, status, inclusion_score, created_at, blocked_count.
     """
-    run_id = str(uuid.uuid4())
+    if not _has_creds():
+        return []
+
+    from app.db import get_client  # deferred — keeps this module import network-free
+
+    client = get_client()
+    app_id = _app_id_for(app_name)
+    res = (
+        client.table("runs")
+        .select("id, mode, status, inclusion_score, created_at")
+        .eq("app_id", app_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = res.data or []
+    if not rows:
+        return []
+
+    # One follow-up query for blocked verdicts across these runs (§17 indicative stream).
+    run_ids = [r["id"] for r in rows]
+    rp = client.table("run_personas").select("run_id, verdict").in_("run_id", run_ids).execute()
+    blocked: dict[str, int] = {}
+    for row in rp.data or []:
+        if row.get("verdict") == "blocked":
+            blocked[row["run_id"]] = blocked.get(row["run_id"], 0) + 1
+
+    return [
+        {
+            "id": r["id"],
+            "mode": r.get("mode"),
+            "status": r.get("status"),
+            "inclusion_score": r.get("inclusion_score"),
+            "created_at": r.get("created_at"),
+            "blocked_count": blocked.get(r["id"], 0),
+        }
+        for r in rows
+    ]
+
+
+def get_run(run_id: str) -> dict | None:
+    """The full persisted evidence pack for one run, or None.
+
+    Returns None when Supabase is unconfigured or the run isn't found, so the
+    route can fall back / 404 cleanly.
+    """
+    if not _has_creds():
+        return None
+
+    from app.db import get_client  # deferred — keeps this module import network-free
+
+    client = get_client()
+    res = (
+        client.table("evidence_packs")
+        .select("pack")
+        .eq("run_id", run_id)
+        .limit(1)
+        .execute()
+    )
+    rows = res.data or []
+    if not rows:
+        return None
+    return rows[0].get("pack")
+
+
+def persist_run(
+    pack: dict,
+    *,
+    run_id: str | None = None,
+    mode: str = "sequential",
+    target_url: str | None = None,
+) -> str:
+    """Persist an evidence pack into run history and return its run_id.
+
+    Pass the caller's `run_id` so the stored row shares the id the API/stream
+    already handed the client (otherwise history can't be linked back). No-op
+    (returns the given/fresh uuid) when Supabase is unconfigured. The route layer
+    calls this best-effort, so a persistence failure never blocks the response.
+    """
+    run_id = run_id or str(uuid.uuid4())
     if not _has_creds():
         return run_id
 
@@ -33,13 +117,23 @@ def persist_run(pack: dict) -> str:
 
     client = get_client()
 
+    # apps (§17): the runs table requires app_id (FK → apps). Upsert a stable app
+    # row by name first so every run satisfies the constraint and is recorded.
+    app_name = pack.get("app") or "app"
+    app_id = _app_id_for(app_name)
+    client.table("apps").upsert(
+        {"id": app_id, "name": app_name, "staging_url": target_url or ""}
+    ).execute()
+
     # runs (§17): one row per assessment, carrying the derived inclusion score.
     client.table("runs").insert(
         {
             "id": run_id,
-            "mode": "sequential",
-            "status": "complete",
+            "app_id": app_id,
+            "mode": mode,
+            "status": "done",
             "inclusion_score": pack.get("inclusion_score"),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
         }
     ).execute()
 
@@ -112,6 +206,7 @@ def persist_run(pack: dict) -> str:
             "summary": {"app": pack.get("app"), "inclusion_score": pack.get("inclusion_score")},
             "matrix": pack.get("matrix"),
             "remediation": pack.get("remediation"),
+            "pack": pack,           # full artifact, so the detail page can rehydrate the run
             "pdf_url": pdf_url,
             "json_url": json_url,
         }

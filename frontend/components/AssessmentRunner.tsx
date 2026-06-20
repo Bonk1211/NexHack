@@ -7,7 +7,8 @@ import {
   mediaUrl,
   type PersonaOption,
   type Pack,
-  type ReplayFrame,
+  type ReplayClip,
+  type PersonaResult,
   type StreamEvent,
   type UsageSummary,
 } from "@/lib/live";
@@ -488,7 +489,7 @@ function PersonaColumn({
   );
 }
 
-function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
+export function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
   return (
     <section className="mt-8 space-y-8">
       {/* Score + synthesis */}
@@ -569,30 +570,18 @@ function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usa
         </div>
       </div>
 
-      {/* Empathy replay — the screen through each persona's lens (§14) */}
+      {/* Empathy replay — one card per persona: an NLP summary of the friction they
+          hit, with the screenshots collapsed into an expandable, slideable carousel. */}
       <div>
         <h2 className="section-label mb-2">Empathy replay</h2>
-        <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Object.entries(pack.replay).map(([persona, clip]) => (
-            <div key={persona} className="rounded-card bg-card p-4">
-              <div className="flex items-center gap-2">
-                <span className="font-display text-[15px] text-primary">{persona}</span>
-                {clip.lenses.length > 0 ? (
-                  clip.lenses.map((l) => (
-                    <span key={l} className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">
-                      {l}
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-[11px] text-tertiary">baseline (no lens)</span>
-                )}
-              </div>
-              <div className="mt-3 flex gap-4 overflow-x-auto pb-2">
-                {clip.frames.map((f) => (
-                  <Frame key={f.step_idx} frame={f} lenses={clip.lenses} />
-                ))}
-              </div>
-            </div>
+            <ReplayCard
+              key={persona}
+              persona={persona}
+              clip={clip}
+              result={pack.personas.find((p) => p.persona === persona)}
+            />
           ))}
         </div>
       </div>
@@ -602,29 +591,121 @@ function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usa
   );
 }
 
-function Frame({ frame, lenses }: { frame: ReplayFrame; lenses: string[] }) {
-  const filter = lenses.map((l) => LENS_FILTER[l]).filter((x) => x && x !== "none").join(" ");
-  const src = mediaUrl(frame.screenshot_url);
+// Compose a one-line, natural-language account of what this persona ran into,
+// derived from their verdict plus the per-frame friction captions.
+function replaySummary(clip: ReplayClip, result?: PersonaResult): string {
+  const problems = clip.frames.filter((f) => f.status === "red" || f.status === "amber");
+  if (result?.verdict === "blocked") {
+    const where = result.blocked_at ? ` at “${result.blocked_at}”` : "";
+    const sev = result.severity ? ` (${result.severity})` : "";
+    const red = clip.frames.find((f) => f.status === "red");
+    const why = red && red.caption !== "ok" ? ` — ${red.caption}` : "";
+    return `Blocked${where}${sev}${why}.`;
+  }
+  if (problems.length > 0) {
+    const first = problems[0];
+    const detail = first.caption !== "ok" ? `: ${first.caption}` : "";
+    return `Completed with friction on ${problems.length} step${problems.length > 1 ? "s" : ""} — first at “${first.step_key}”${detail}.`;
+  }
+  return "Completed the whole flow with no friction flagged.";
+}
+
+function ReplayCard({
+  persona,
+  clip,
+  result,
+}: {
+  persona: string;
+  clip: ReplayClip;
+  result?: PersonaResult;
+}) {
+  const [open, setOpen] = useState(false);
+  const [idx, setIdx] = useState(0);
+  const n = clip.frames.length;
+  const blocked = result?.verdict === "blocked";
+  const filter = clip.lenses.map((l) => LENS_FILTER[l]).filter((x) => x && x !== "none").join(" ");
+
+  const cur = n > 0 ? clip.frames[Math.min(idx, n - 1)] : undefined;
+  const src = cur ? mediaUrl(cur.screenshot_url) : null;
+  const go = (d: number) => setIdx((i) => (i + d + n) % n);
+
   return (
-    <div className="w-[180px] shrink-0">
-      <div className="overflow-hidden rounded-lg border border-hairline bg-field">
-        {src ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={src}
-            alt={`${frame.step_key} as seen`}
-            className="h-[300px] w-full object-cover object-top"
-            style={{ filter: filter || undefined }}
-          />
+    <div className={`rounded-card p-4 ${blocked ? "bg-tint-blocked border-l-[3px] border-blocked" : "bg-card"}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-display text-[15px] text-primary">{persona}</span>
+        {clip.lenses.length > 0 ? (
+          clip.lenses.map((l) => (
+            <span key={l} className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">{l}</span>
+          ))
         ) : (
-          <div className="flex h-[300px] items-center justify-center text-[12px] text-tertiary">no frame</div>
+          <span className="text-[11px] text-tertiary">baseline (no lens)</span>
         )}
       </div>
-      <div className={`mt-1.5 flex items-center gap-1.5 text-[12px] ${STATUS_COLOR[frame.status]}`}>
-        <span className={`h-2 w-2 rounded-full ${STATUS_DOT[frame.status]}`} />
-        {frame.step_key}
-      </div>
-      <div className="text-[12px] text-secondary">{frame.caption}</div>
+
+      {/* NLP summary — always visible, the space-saving default */}
+      <p className={`mt-2 text-[13px] leading-relaxed ${blocked ? "font-medium text-blocked" : "text-secondary"}`}>
+        {replaySummary(clip, result)}
+      </p>
+      {result && result.wcag_failures.length > 0 && (
+        <p className="mt-1 text-[12px] text-tertiary">WCAG: {result.wcag_failures.join(", ")}</p>
+      )}
+
+      {n > 0 && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="mt-3 text-[12px] font-medium text-brand hover:underline"
+        >
+          {open ? "Hide screenshots" : `Show ${n} screenshot${n > 1 ? "s" : ""}`}
+        </button>
+      )}
+
+      {/* Slideable carousel — one frame at a time, revealed on demand */}
+      {open && cur && (
+        <div className="mt-3">
+          <div className="relative overflow-hidden rounded-lg border border-hairline bg-field">
+            {src ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={src}
+                alt={`${cur.step_key} as ${persona} saw it`}
+                className="h-[320px] w-full object-cover object-top"
+                style={{ filter: filter || undefined }}
+              />
+            ) : (
+              <div className="flex h-[320px] items-center justify-center text-[12px] text-tertiary">no frame</div>
+            )}
+            {n > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => go(-1)}
+                  aria-label="Previous screenshot"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-anchor/70 px-2.5 py-1 text-[14px] text-on-dark hover:bg-anchor"
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  onClick={() => go(1)}
+                  aria-label="Next screenshot"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-anchor/70 px-2.5 py-1 text-[14px] text-on-dark hover:bg-anchor"
+                >
+                  ›
+                </button>
+                <span className="absolute bottom-2 right-2 rounded-full bg-anchor/70 px-2 py-0.5 text-[11px] text-on-dark">
+                  {Math.min(idx, n - 1) + 1} / {n}
+                </span>
+              </>
+            )}
+          </div>
+          <div className={`mt-1.5 flex items-center gap-1.5 text-[12px] ${STATUS_COLOR[cur.status]}`}>
+            <span className={`h-2 w-2 rounded-full ${STATUS_DOT[cur.status]}`} />
+            {cur.step_key}
+          </div>
+          <div className="text-[12px] text-secondary">{cur.caption}</div>
+        </div>
+      )}
     </div>
   );
 }

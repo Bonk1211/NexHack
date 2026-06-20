@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -11,7 +11,20 @@ import {
   linkPersona,
   unlinkPersona,
 } from "@/lib/api";
+import { listRuns, type RunHistoryItem } from "@/lib/live";
 import type { ProjectDetail, RunSummary, Persona, RunMode } from "@/lib/types";
+
+// Map a Supabase-backed run-history row to the UI's RunSummary shape.
+function toRunSummary(projectId: string, r: RunHistoryItem): RunSummary {
+  return {
+    id: r.id,
+    projectId,
+    mode: (r.mode as RunMode) ?? "sequential",
+    createdAt: r.created_at,
+    overallScore: r.inclusion_score ?? 0,
+    blockedCount: r.blocked_count,
+  };
+}
 import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
@@ -36,18 +49,32 @@ export default function ProjectDetailPage() {
   const [showRunner, setShowRunner] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [showPersonaModal, setShowPersonaModal] = useState(false);
+  // Fixture runs, kept as a fallback for when Supabase has no real runs yet.
+  const fixtureRunsRef = useRef<RunSummary[]>([]);
+
+  // Prefer Supabase-persisted runs (keyed by app name); fall back to fixtures.
+  async function loadRuns(appName: string, fallback: RunSummary[]) {
+    try {
+      const live = await listRuns(appName);
+      setRuns(live.length ? live.map((r) => toRunSummary(projectId, r)) : fallback);
+    } catch {
+      setRuns(fallback);
+    }
+  }
 
   useEffect(() => {
     Promise.all([
       getProject(projectId),
       getProjectRuns(projectId),
       getPersonas(),
-    ]).then(([p, r, personas]) => {
+    ]).then(async ([p, r, personas]) => {
       setProject(p);
-      setRuns(r);
       setAllPersonas(personas);
+      fixtureRunsRef.current = r;
+      await loadRuns(p.name, r);
       setLoading(false);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   // The acceptance test IS the live agent assessment (FR-1.1–1.4): reveal the runner
@@ -55,6 +82,11 @@ export default function ProjectDetailPage() {
   function handleStartRun() {
     setShowRunner(true);
     setTab("runs");
+  }
+
+  // Pull in any newly persisted run (e.g. after hiding the runner post-assessment).
+  function refreshRuns() {
+    if (project) loadRuns(project.name, fixtureRunsRef.current);
   }
 
   if (loading) {
@@ -161,7 +193,10 @@ export default function ProjectDetailPage() {
             runs={runs}
             projectId={projectId}
             showRunner={showRunner}
-            onHide={() => setShowRunner(false)}
+            onHide={() => {
+              setShowRunner(false);
+              refreshRuns();
+            }}
             appName={project.name}
             mode={runMode}
           />
