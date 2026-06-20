@@ -10,3 +10,4 @@ alter table runs            enable row level security;
 alter table run_personas    enable row level security;
 alter table screen_events   enable row level security;
 alter table evidence_packs  enable row level security;
+alter table run_model_usage enable row level security;  -- created in 0003_usage
