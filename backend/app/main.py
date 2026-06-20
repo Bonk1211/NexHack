@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routes import projects, runs
+from app.routes import personas, projects, runs
 
 app = FastAPI(title="InclusionScope", version="0.1.0")
 
@@ -21,8 +21,8 @@ app.add_middleware(
 )
 
 app.include_router(runs.router)
-app.include_router(runs.personas_router)
 app.include_router(projects.router)
+app.include_router(personas.router)
 
 # Serve per-run screenshots (FR-1.3 empathy-replay frames) when Supabase Storage is
 # not configured — the run route rewrites local paths to /artifacts/<run_id>/... URLs.

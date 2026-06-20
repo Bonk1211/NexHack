@@ -121,72 +121,66 @@ export async function unlinkPersona(repoId: string, personaId: string): Promise<
 
 // ── Personas ──────────────────────────────────────────────────
 export async function getPersonas(): Promise<Persona[]> {
-  await delay();
-  return db.personas.map((p) => ({ ...p }));
+  const res = await fetch(`${BASE_URL}/personas`);
+  if (!res.ok) throw new Error(`GET /personas failed: ${res.status}`);
+  const rows: Persona[] = await res.json();
+  const { generateFigurine: gen } = await import("./format");
+  // Use real figurine URL from DB if ready, otherwise fall back to SVG placeholder
+  return rows.map((p) => ({
+    ...p,
+    figurineUrl: p.figurineUrl ?? gen(p.id, p.identity.name),
+  }));
 }
 
 export async function createPersona(input: Partial<Persona> & { identity: Partial<Persona["identity"]> & { name: string } }): Promise<Persona> {
-  await delay();
-  const p: Persona = {
-    id: uid("p"),
-    identity: {
-      name: input.identity.name,
-      label: input.identity.label ?? "",
-      ageBand: input.identity.ageBand ?? "25–34",
-      language: input.identity.language ?? "English",
-      techSavviness: input.identity.techSavviness ?? 0.5,
-      disabilities: input.identity.disabilities ?? [],
-    },
-    behavior: input.behavior ?? {
-      dwellMultiplier: 1,
-      giveupThresholdS: 60,
-      misinterpretProb: 0.2,
-    },
-    figurineStatus: "none",
-  };
-  db.personas.push(p);
-  return { ...p };
+  const res = await fetch(`${BASE_URL}/personas`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identity: input.identity, behavior: input.behavior }),
+  });
+  if (!res.ok) throw new Error(`POST /personas failed: ${res.status}`);
+  const p: Persona = await res.json();
+  const { generateFigurine: gen } = await import("./format");
+  return { ...p, figurineUrl: p.figurineUrl ?? gen(p.id, p.identity.name) };
 }
 
 export async function getPersona(id: string): Promise<Persona> {
-  await delay();
-  const p = db.personas.find((x) => x.id === id);
-  if (!p) throw new Error(`Persona ${id} not found`);
-  return { ...p };
+  const res = await fetch(`${BASE_URL}/personas/${id}`);
+  if (!res.ok) throw new Error(`GET /personas/${id} failed: ${res.status}`);
+  const p: Persona = await res.json();
+  const { generateFigurine: gen } = await import("./format");
+  return { ...p, figurineUrl: p.figurineUrl ?? gen(p.id, p.identity.name) };
 }
 
 export async function updatePersona(id: string, patch: Partial<Persona>): Promise<Persona> {
-  await delay();
-  const idx = db.personas.findIndex((x) => x.id === id);
-  if (idx < 0) throw new Error(`Persona ${id} not found`);
-  db.personas[idx] = { ...db.personas[idx], ...patch };
-  return { ...db.personas[idx] };
+  const res = await fetch(`${BASE_URL}/personas/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identity: patch.identity, behavior: patch.behavior }),
+  });
+  if (!res.ok) throw new Error(`PUT /personas/${id} failed: ${res.status}`);
+  const p: Persona = await res.json();
+  const { generateFigurine: gen } = await import("./format");
+  return { ...p, figurineUrl: p.figurineUrl ?? gen(p.id, p.identity.name) };
 }
 
 export async function deletePersona(id: string): Promise<void> {
-  await delay();
-  db.personas = db.personas.filter((p) => p.id !== id);
+  const res = await fetch(`${BASE_URL}/personas/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE /personas/${id} failed: ${res.status}`);
 }
 
 export async function generateFigurine(id: string): Promise<{ status: FigurineStatus }> {
-  await delay(100);
-  const p = db.personas.find((x) => x.id === id);
-  if (p) p.figurineStatus = "generating";
-  return { status: "generating" };
+  const res = await fetch(`${BASE_URL}/personas/${id}/figurine`, { method: "POST" });
+  if (!res.ok) throw new Error(`POST /personas/${id}/figurine failed: ${res.status}`);
+  return res.json();
 }
 
 export async function pollFigurine(
   id: string,
 ): Promise<{ status: FigurineStatus; url?: string }> {
-  await delay(800);
-  const p = db.personas.find((x) => x.id === id);
-  if (!p) return { status: "failed" };
-  if (p.figurineStatus === "generating") {
-    const { generateFigurine: gen } = await import("./format");
-    p.figurineUrl = gen(p.id, p.identity.name);
-    p.figurineStatus = "ready";
-  }
-  return { status: p.figurineStatus, url: p.figurineUrl };
+  const res = await fetch(`${BASE_URL}/personas/${id}/figurine`);
+  if (!res.ok) return { status: "failed" };
+  return res.json();
 }
 
 // ── Runs ──────────────────────────────────────────────────────

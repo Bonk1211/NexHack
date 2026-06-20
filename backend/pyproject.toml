@@ -17,6 +17,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",  # per-persona crash-resume (§8 run graph)
     "langchain-deepseek>=0.1",       # DeepSeek V4 LLM nodes — comprehend + synthesize (§15, §25 LOCKED)
     "langchain-core>=0.3",           # message/structured-output primitives
+    "dashscope>=1.25.23",
 ]
 
 [dependency-groups]

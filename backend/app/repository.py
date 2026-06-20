@@ -440,3 +440,117 @@ def fetch_project_dashboard(app_id: str) -> dict:
 
     wcag = wcag_pass_rate_by_run(run_ids, rp_rows, event_rows)
     return aggregate_dashboard(app_id, runs_rows, rp_rows, model_rows, wcag)
+
+
+# ── Personas ──────────────────────────────────────────────────────────────────
+
+def _row_to_persona(row: dict) -> dict:
+    bp = row.get("behavior_profile") or {}
+    status = row.get("figurine_status") or "none"
+    return {
+        "id": row["slug"],
+        "identity": {
+            "name": row["name"],
+            "label": row.get("label") or "",
+            "ageBand": row.get("age_band") or "",
+            "language": row.get("language") or "",
+            "techSavviness": float(row.get("tech_savviness") or 0),
+            "disabilities": row.get("disabilities") or [],
+        },
+        "behavior": {
+            "dwellMultiplier": float(bp.get("dwell_multiplier", 1.0)),
+            "giveupThresholdS": float(bp.get("giveup_threshold_s", 60)),
+            "misinterpretProb": float(row.get("misinterpret_prob") or 0),
+        },
+        "figurineStatus": status,
+        "figurineUrl": row.get("figurine_url"),
+    }
+
+
+def list_personas() -> list[dict]:
+    if not _has_creds():
+        return []
+    from app.db import get_client
+    rows = get_client().table("personas").select("*").order("created_at").execute().data or []
+    return [_row_to_persona(r) for r in rows]
+
+
+def get_persona_by_slug(slug: str) -> dict | None:
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    rows = get_client().table("personas").select("*").eq("slug", slug).limit(1).execute().data or []
+    return _row_to_persona(rows[0]) if rows else None
+
+
+def create_persona(identity: dict, behavior: dict) -> dict | None:
+    if not _has_creds():
+        return None
+    import re
+    from app.db import get_client
+    slug = "p-" + re.sub(r"[^a-z0-9]+", "-", identity["name"].lower()).strip("-")[:20]
+    row = {
+        "slug": slug,
+        "name": identity["name"],
+        "label": identity.get("label", ""),
+        "age_band": identity.get("ageBand", "25–34"),
+        "tech_savviness": identity.get("techSavviness", 0.5),
+        "language": identity.get("language", "English"),
+        "disabilities": identity.get("disabilities", []),
+        "behavior_profile": {
+            "dwell_multiplier": behavior.get("dwellMultiplier", 1.0),
+            "giveup_threshold_s": behavior.get("giveupThresholdS", 60),
+        },
+        "misinterpret_prob": behavior.get("misinterpretProb", 0.2),
+        "thresholds": {},
+    }
+    res = get_client().table("personas").insert(row).execute()
+    rows = res.data or []
+    return _row_to_persona(rows[0]) if rows else None
+
+
+def update_persona(slug: str, identity: dict, behavior: dict) -> dict | None:
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    patch = {
+        "name": identity["name"],
+        "label": identity.get("label", ""),
+        "age_band": identity.get("ageBand", "25–34"),
+        "tech_savviness": identity.get("techSavviness", 0.5),
+        "language": identity.get("language", "English"),
+        "disabilities": identity.get("disabilities", []),
+        "behavior_profile": {
+            "dwell_multiplier": behavior.get("dwellMultiplier", 1.0),
+            "giveup_threshold_s": behavior.get("giveupThresholdS", 60),
+        },
+        "misinterpret_prob": behavior.get("misinterpretProb", 0.2),
+    }
+    res = get_client().table("personas").update(patch).eq("slug", slug).execute()
+    rows = res.data or []
+    return _row_to_persona(rows[0]) if rows else None
+
+
+def delete_persona(slug: str) -> None:
+    if not _has_creds():
+        return
+    from app.db import get_client
+    get_client().table("personas").delete().eq("slug", slug).execute()
+
+
+def get_raw_persona_row(slug: str) -> dict | None:
+    if not _has_creds():
+        return None
+    from app.db import get_client
+    rows = get_client().table("personas").select("*").eq("slug", slug).limit(1).execute().data or []
+    return rows[0] if rows else None
+
+
+def set_figurine_status(slug: str, status: str, url: str | None = None) -> None:
+    if not _has_creds():
+        return
+    from app.db import get_client
+    patch: dict = {"figurine_status": status}
+    if url is not None:
+        patch["figurine_url"] = url
+    get_client().table("personas").update(patch).eq("slug", slug).execute()

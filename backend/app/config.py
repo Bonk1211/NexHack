@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Source: DeepSeek V4 pricing (Apidog, Apr 24 2026) — USD per 1K tokens
     llm_pricing_currency: str = "USD"
 
+    dashscope_api_key: str = ""          # Alibaba DashScope — figurine image generation
+    figurine_bucket: str = "figurine"    # Supabase Storage bucket for figurine PNGs
+
     run_seed: int = 1337
     wcag_version: str = "2.2"
     slack_webhook_url: str = ""

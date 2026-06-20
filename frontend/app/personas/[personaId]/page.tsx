@@ -73,7 +73,9 @@ export default function PersonaDetailPage() {
   }, [personaId, isNew]);
 
   const pollUntilReady = useCallback(async (id: string) => {
-    for (let i = 0; i < 10; i++) {
+    // Generation takes 30-60s — poll every 4s for up to 90s (22 attempts)
+    for (let i = 0; i < 22; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
       const res = await pollFigurine(id);
       if (res.status === "ready") {
         setFigurineStatus("ready");
