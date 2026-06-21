@@ -145,7 +145,7 @@ export async function createProject(input: {
 
 export async function updateProject(
   id: string,
-  patch: { description?: string },
+  patch: { description?: string; goal?: string; successUrl?: string },
 ): Promise<Project> {
   const res = await fetch(`${BASE_URL}/runs/apps/${id}`, {
     method: "PATCH",
@@ -462,105 +462,27 @@ function severityFor(p: RunDetail["personaResults"][number]): ActionItem["severi
 }
 
 export async function getProjectDashboard(projectId: string): Promise<ProjectDashboard> {
-  await delay();
-  const summaries = db.runSummaries[projectId] ?? [];
-  const runDetails = summaries
-    .map((s) => db.runs[s.id])
-    .filter((r): r is RunDetail => Boolean(r));
-
-  // oldest → newest for trend charts
-  const ordered = [...runDetails].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-  );
-
-  const usageByRun = new Map(ordered.map((r) => [r.id, mockRunUsage(r)]));
-
-  const trend: RunTrendPoint[] = ordered.map((r) => {
-    const u = usageByRun.get(r.id)!;
-    return {
-      runId: r.id,
-      createdAt: r.createdAt,
-      overallScore: r.overallScore,
-      blockedCount: r.personaResults.filter((p) => p.status === "blocked").length,
-      wcagPassRate: mockWcagPassRate(r),
-      totalTokens: u.totalTokens,
-      cost: u.cost,
-    };
-  });
-
-  // persona reliability across all project runs
-  const relMap = new Map<string, PersonaReliability & { _lastAt: number }>();
-  for (const r of ordered) {
-    const at = new Date(r.createdAt).getTime();
-    for (const p of r.personaResults) {
-      const cur =
-        relMap.get(p.personaId) ??
-        ({ personaId: p.personaId, name: p.persona.identity.name, runsCount: 0, blockedCount: 0, blockRate: 0, lastStatus: "ok" as Severity, _lastAt: -1 });
-      cur.runsCount += 1;
-      if (p.status === "blocked") cur.blockedCount += 1;
-      if (at >= cur._lastAt) {
-        cur._lastAt = at;
-        cur.lastStatus = p.status;
-      }
-      relMap.set(p.personaId, cur);
-    }
-  }
-  const personaReliability: PersonaReliability[] = [...relMap.values()]
-    .map(({ _lastAt, ...rest }) => ({ ...rest, blockRate: rest.runsCount ? rest.blockedCount / rest.runsCount : 0 }))
-    .sort((a, b) => b.blockRate - a.blockRate);
-
-  // usage summed by model across runs
-  const modelMap = new Map<string, UsageModel>();
-  for (const u of usageByRun.values()) {
-    for (const m of u.models) {
-      const cur =
-        modelMap.get(m.model) ??
-        ({ model: m.model, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, pricingApplied: true });
-      cur.promptTokens += m.promptTokens;
-      cur.completionTokens += m.completionTokens;
-      cur.totalTokens += m.totalTokens;
-      cur.cost += m.cost;
-      modelMap.set(m.model, cur);
-    }
-  }
-  const usageByModel = [...modelMap.values()].sort((a, b) => b.totalTokens - a.totalTokens);
-
-  // action queue: open blocks, P0→P3 then most recent
-  const sevRank: Record<ActionItem["severity"], number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
-  const actions: ActionItem[] = ordered
-    .flatMap((r) =>
-      r.personaResults
-        .filter((p) => p.status === "blocked")
-        .map((p) => ({
-          runId: r.id,
-          personaId: p.personaId,
-          personaName: p.persona.identity.name,
-          severity: severityFor(p),
-          blockedAt: p.blockedAt ?? "",
-          owner: p.persona.identity.disabilities[0],
-          _at: new Date(r.createdAt).getTime(),
-        })),
-    )
-    .filter((a) => a.severity === "P0" || a.severity === "P1")
-    .sort((a, b) => sevRank[a.severity] - sevRank[b.severity] || b._at - a._at)
-    .map(({ _at, ...rest }) => rest);
-
-  const totalTokens = [...usageByRun.values()].reduce((n, u) => n + u.totalTokens, 0);
-  const totalCost = [...usageByRun.values()].reduce((n, u) => n + u.cost, 0);
-  const latest = ordered[ordered.length - 1];
-
+  try {
+    const res = await fetch(`${BASE_URL}/projects/${projectId}/dashboard`);
+    if (res.ok) return res.json();
+  } catch {}
+  // Fallback to empty dashboard if API fails
   return {
     projectId,
-    runsCount: ordered.length,
-    latestScore: latest?.overallScore,
-    totalTokens,
-    totalCost,
+    runsCount: 0,
+    latestScore: undefined,
+    totalTokens: 0,
+    totalCost: 0,
     currency: "USD",
-    pricingApplied: ordered.length > 0,
-    trend,
-    personaReliability,
-    usageByModel,
-    actions,
+    pricingApplied: false,
+    avgTokensPerRun: 0,
+    avgCostPerRun: 0,
+    avgInclusionScore: undefined,
+    avgBlockedPerRun: 0,
+    trend: [],
+    personaReliability: [],
+    usageByModel: [],
+    actions: [],
   };
 }
 

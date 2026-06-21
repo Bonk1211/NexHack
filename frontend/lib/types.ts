@@ -55,6 +55,8 @@ export interface Project {
   description?: string;
   repoUrl?: string;
   stagingUrl?: string;
+  goal?: string;
+  successUrl?: string;
   personaCount: number;
   latestScore?: number; // 0..1
   lastRunAt?: string; // ISO-8601
@@ -212,6 +214,11 @@ export interface ProjectDashboard {
   totalCost: number;
   currency: string;
   pricingApplied: boolean;
+  // aggregated metrics
+  avgTokensPerRun: number;
+  avgCostPerRun: number;
+  avgInclusionScore?: number;
+  avgBlockedPerRun: number;
   // sections
   trend: RunTrendPoint[];
   personaReliability: PersonaReliability[];
