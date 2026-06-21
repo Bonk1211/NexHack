@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<!--
+  Multi-screen SPA wizard fixture (§22) — mirrors the BrewPoints signup shape so the
+  AUTONOMOUS agent can be exercised end-to-end offline (network-free, deterministic):
+    screen 1 (phone)   : a text input + primary CTA + a Skip link (the skip-trap)
+    screen 2 (verify)  : 4 separate OTP digit boxes + CTA
+    screen 3 (profile) : text inputs + a NAMED <select> + 3 UNNAMED <select>s (birthday)
+                         + required-field validation gate on the CTA
+    screen 4 (perms)   : 4 unnamed switches + Finish
+    screen 5 (done)    : terminal "You're in!" — no further controls
+
+  Exercises every interaction type the agent must handle: fill, select_option, toggle,
+  nth-targeting of unnamed duplicates, validation-gated advance, and skip-avoidance.
+-->
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wizard Fixture</title>
+</head>
+<body>
+  <main id="app"></main>
+  <script>
+    const state = { screen: 0, otp: ["", "", "", ""], birthday: ["", "", ""] };
+
+    function h(html) { document.getElementById("app").innerHTML = html; }
+
+    function screenPhone() {
+      h(`
+        <h1>Join</h1>
+        <label for="phone">Mobile Number</label>
+        <input id="phone" aria-label="Mobile Number" placeholder="12-345 6789" />
+        <button id="cta">Continue</button>
+        <a id="skip" href="#perms">Skip for now</a>
+      `);
+      document.getElementById("cta").onclick = () => go(1);
+      document.getElementById("skip").onclick = (e) => { e.preventDefault(); go(3); };
+    }
+
+    function screenVerify() {
+      h(`
+        <h1>Verify Your Number</h1>
+        <p>Hint: the code is 1234</p>
+        <input aria-label="Digit 1" />
+        <input aria-label="Digit 2" />
+        <input aria-label="Digit 3" />
+        <input aria-label="Digit 4" />
+        <button id="cta">Verify</button>
+        <a id="skip" href="#perms">Skip for now</a>
+      `);
+      document.getElementById("cta").onclick = () => go(2);
+      document.getElementById("skip").onclick = (e) => { e.preventDefault(); go(3); };
+    }
+
+    function years() {
+      let o = '<option value="">YYYY</option>';
+      for (let y = 2010; y >= 1990; y--) o += `<option value="${y}">${y}</option>`;
+      return o;
+    }
+
+    function screenProfile() {
+      h(`
+        <h1>Tell Us About You</h1>
+        <label for="name">Full Name</label>
+        <input id="name" aria-label="Full Name" />
+        <label for="email">Email</label>
+        <input id="email" aria-label="Email" />
+        <label for="outlet">Favourite Outlet</label>
+        <select id="outlet" aria-label="Favourite Outlet">
+          <option value="">Select an outlet...</option>
+          <option>BrewPoints KLCC</option>
+          <option>BrewPoints Mid Valley</option>
+        </select>
+        <select id="by">${years()}</select>
+        <select id="bm"><option value="">MM</option><option>01</option><option>06</option></select>
+        <select id="bd"><option value="">DD</option><option>01</option><option>15</option></select>
+        <button id="cta">Continue</button>
+        <a id="skip" href="#perms">Skip for now</a>
+        <p id="err" style="color:red"></p>
+      `);
+      document.getElementById("cta").onclick = () => {
+        const by = document.getElementById("by").value;
+        const bm = document.getElementById("bm").value;
+        const bd = document.getElementById("bd").value;
+        if (!by || !bm || !bd) {
+          document.getElementById("err").textContent = "Please enter your birthday";
+          return;
+        }
+        go(3);
+      };
+      document.getElementById("skip").onclick = (e) => { e.preventDefault(); go(3); };
+    }
+
+    function screenPerms() {
+      h(`
+        <h1>Stay in the Loop</h1>
+        <div><button role="switch" aria-checked="true"></button><span>Promo offers</span></div>
+        <div><button role="switch" aria-checked="true"></button><span>News updates</span></div>
+        <div><button role="switch" aria-checked="true"></button><span>Share with partners</span></div>
+        <div><button role="switch" aria-checked="true"></button><span>SMS me</span></div>
+        <button id="cta">Finish Sign Up</button>
+      `);
+      document.querySelectorAll('[role=switch]').forEach((s) => {
+        s.onclick = () => s.setAttribute("aria-checked", s.getAttribute("aria-checked") === "true" ? "false" : "true");
+      });
+      document.getElementById("cta").onclick = () => go(4);
+    }
+
+    function screenDone() {
+      h(`<h1>You're in!</h1><p>Welcome, friend!</p>`);
+    }
+
+    const screens = [screenPhone, screenVerify, screenProfile, screenPerms, screenDone];
+    function go(i) { state.screen = i; screens[i](); }
+    go(0);
+  </script>
+</body>
+</html>

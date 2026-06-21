@@ -23,6 +23,8 @@ def run_assessment(
     target_url: str,
     persona_names: list[str],
     flow: list[FlowStep] | None = None,
+    goal: str = "",
+    max_steps: int = 20,
     seed: int = 1337,
     artifact_root: str | None = None,
     run_id: str | None = None,
@@ -31,13 +33,16 @@ def run_assessment(
 
     Delegates to the run graph. Return shape is unchanged: the §13 pack dict plus a
     `screenshots` key mapping each persona to its per-step screenshot paths, and a
-    `synthesis` block (once-per-run LLM reasoning, §15).
+    `synthesis` block (once-per-run LLM reasoning, §15). When `flow` is omitted but a
+    `goal` is given, each persona explores the app autonomously (goal-driven).
     """
     return _run_assessment(
         app_name=app_name,
         target_url=target_url,
         persona_names=persona_names,
         flow=flow,
+        goal=goal,
+        max_steps=max_steps,
         seed=seed,
         artifact_root=artifact_root,
         run_id=run_id,

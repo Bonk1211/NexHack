@@ -76,6 +76,50 @@ def _resolve_flow(app_name: str) -> list[FlowStep]:
         return DEFAULT_FLOW
 
 
+# Default goal for autonomous exploration when an app defines neither flow_steps nor a goal.
+_DEFAULT_GOAL = (
+    "Perform a deep two-pass functional test of this app, whatever its purpose "
+    "(sign-up / login / onboarding / KYC / checkout / booking / application / survey / "
+    "profile setup / settings). "
+    "PASS 1 — PRIMARY FLOW: follow the main user journey screen by screen "
+    "(fill inputs, choose dropdown options, accept required terms, click the primary CTA "
+    "— Continue / Next / Submit / Verify / Sign Up / Pay / Confirm / Finish — to advance, "
+    "never use 'Skip' shortcuts) until you reach the END state. The END state is a success "
+    "/ confirmation / completion screen such as: a dashboard, home, feed, account or "
+    "profile page; a 'You're in' / 'Welcome' / 'Success' / 'Thank you' / 'All done' / "
+    "'Order placed' / 'Payment successful' / 'Application submitted' / rewards or receipt "
+    "screen — a screen with no further required step. "
+    "PASS 2 — SECONDARY EXPLORATION: navigate back through each screen and test "
+    "every secondary control you skipped (Resend, Help, Skip, Cancel, Edit, toggles, "
+    "carousels, tabs, links, menus). "
+    "Stop only when both passes are complete for every reachable screen."
+)
+
+
+def _resolve_goal(app_name: str) -> str:
+    """Look up a custom exploration goal for an app; fall back to the default goal."""
+    try:
+        from app.db import get_client
+        client = get_client()
+        apps = client.table("apps").select("goal").eq("name", app_name).limit(1).execute().data or []
+        goal = (apps[0].get("goal") if apps else "") or ""
+        return goal.strip() or _DEFAULT_GOAL
+    except Exception:
+        logger.warning("_resolve_goal: DB error for '%s', using default goal", app_name, exc_info=True)
+        return _DEFAULT_GOAL
+
+
+def _resolve_journey(app_name: str) -> tuple[list[FlowStep], str]:
+    """All apps explore autonomously.
+
+    Scripted flow_steps in the DB are intentionally ignored here: they were only
+    ever partial lists (fill steps with no navigation clicks between pages), so
+    replaying them kept the persona on the first page. The autonomous agent drives
+    the real UI and navigates naturally across pages toward the app's goal.
+    """
+    return [], _resolve_goal(app_name)
+
+
 class StartRunRequest(BaseModel):
     app_name: str
     target_url: str
@@ -265,13 +309,14 @@ def start_run(req: StartRunRequest) -> dict:
     # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
     # (returns the existing pack), neither re-runs nor duplicates personas.
     run_id = req.run_id or str(uuid.uuid4())
-    flow = _resolve_flow(req.app_name)
+    flow, goal = _resolve_journey(req.app_name)
     with track_usage() as tracker:
         pack = orchestrator.run_assessment(
             app_name=req.app_name,
             target_url=req.target_url,
             persona_names=req.persona_names,
             flow=flow,
+            goal=goal,
             seed=req.seed,
             run_id=run_id,
             artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
@@ -361,6 +406,7 @@ def stream_run(
                 set_tracker(tracker)
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
+                flow, goal = _resolve_journey(app_name)
                 payload = {
                     "persona": name,
                     "persona_idx": i,
@@ -368,7 +414,9 @@ def stream_run(
                     "requires_labels": _requires_labels(cfg),
                     "thresholds": thresholds,
                     "target_url": target_url,
-                    "flow": _resolve_flow(app_name),
+                    "flow": flow,
+                    "goal": goal,                     # autonomous exploration when flow is empty
+                    "max_steps": 50,                  # safety cap on the autonomous loop
                     "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
                     "seed": seed + i,                 # §16 deterministic per persona
                     "artifact_dir": str(root / name),  # FR-1.3 screenshot every step
@@ -389,12 +437,14 @@ def stream_run(
                                "node": "observe", "step_idx": len(steps),
                                "output": {"captured": f"step {len(steps)} screen + a11y tree"},
                                "screenshot_url": _to_served_url(data.get("current_shot"))})
-                    elif node == "comprehend":
+                    elif node == "plan":
+                        act = data.get("current_action") or {}
                         q.put({"type": "node", "scope": "persona", "persona": name,
-                               "node": "comprehend", "confusion": data.get("last_confusion"),
-                               "output": {"confusion": data.get("last_confusion"),
-                                          "reason": data.get("last_reason"),
-                                          "fallback_target": data.get("last_fallback")}})
+                               "node": "plan", "confusion": data.get("last_confusion"),
+                               "output": {"action": act.get("action"),
+                                          "target": act.get("name") or act.get("role"),
+                                          "confusion": data.get("last_confusion"),
+                                          "reason": data.get("last_reason")}})
                     elif node == "decide":
                         q.put({"type": "node", "scope": "persona", "persona": name,
                                "node": "decide", "dwell_s": data.get("current_dwell"),
@@ -402,6 +452,8 @@ def stream_run(
                                           "label_block": data.get("current_label_block"),
                                           "give_up": data.get("current_give_up")}})
                     elif node == "act":
+                        if "steps" not in data:  # done-path early return has no step row
+                            continue
                         step = data["steps"][0]
                         shot = data["shots"][0]
                         steps.append(step)

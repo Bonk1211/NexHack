@@ -90,7 +90,9 @@ def fan_out(state: RunState) -> list[Send]:
             "requires_labels": _requires_labels(persona),
             "thresholds": thresholds_for(persona),
             "target_url": state["target_url"],
-            "flow": state["flow"],
+            "flow": state.get("flow") or [],
+            "goal": state.get("goal", ""),
+            "max_steps": state.get("max_steps", 20),
             "viewport": state.get("viewport", "iPhone 13"),
             "seed": state["seed"] + i,
             "artifact_dir": (
@@ -195,6 +197,8 @@ def run_assessment(
     target_url: str,
     persona_names: list[str],
     flow: list[FlowStep] | None = None,
+    goal: str = "",
+    max_steps: int = 20,
     seed: int = 1337,
     artifact_root: str | None = None,
     run_id: str | None = None,
@@ -207,12 +211,22 @@ def run_assessment(
     # Carry the file stem as the persona identity (the matrix/pack key, §17),
     # matching the pre-graph orchestrator contract.
     personas = [{**load_persona(name), "stem": name} for name in persona_names]
+    # Autonomy kicks in only when a goal is supplied (or an explicit empty flow + goal);
+    # with neither, fall back to DEFAULT_FLOW so the demo's scripted behavior is unchanged.
+    if flow:
+        resolved_flow = flow
+    elif goal:
+        resolved_flow = []
+    else:
+        resolved_flow = DEFAULT_FLOW
     init_state: RunState = {
         "app": app_name,
         "target_url": target_url,
         "viewport": "iPhone 13",
         "personas": personas,
-        "flow": flow if flow is not None else DEFAULT_FLOW,
+        "flow": resolved_flow,
+        "goal": goal,
+        "max_steps": max_steps,
         "seed": seed,
         "artifact_root": artifact_root,
         "persona_results": [],

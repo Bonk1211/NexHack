@@ -294,6 +294,7 @@ const NODE_DOT: Record<string, string> = {
   start: "bg-tertiary",
   observe: "bg-brand",
   comprehend: "bg-friction",
+  plan: "bg-friction",
   decide: "bg-tertiary",
   act: "bg-anchor",
   done: "bg-ok",
@@ -665,9 +666,22 @@ function ReplayCard({
   const blocked = result?.verdict === "blocked";
   const filter = clip.lenses.map((l) => LENS_FILTER[l]).filter((x) => x && x !== "none").join(" ");
 
-  const cur = n > 0 ? clip.frames[Math.min(idx, n - 1)] : undefined;
+  const curIdx = Math.min(idx, n - 1);
+  const cur = n > 0 ? clip.frames[curIdx] : undefined;
   const src = cur ? mediaUrl(cur.screenshot_url) : null;
   const go = (d: number) => setIdx((i) => (i + d + n) % n);
+
+  // Warm the browser cache with every frame as soon as the card mounts, so the
+  // carousel renders instantly on open and on each slide — no on-demand fetch.
+  useEffect(() => {
+    for (const f of clip.frames) {
+      const u = mediaUrl(f.screenshot_url);
+      if (u) {
+        const img = new Image();
+        img.src = u;
+      }
+    }
+  }, [clip.frames]);
 
   return (
     <div className={`rounded-card p-4 ${blocked ? "bg-tint-blocked border-l-[3px] border-blocked" : "bg-card"}`}>
@@ -703,16 +717,24 @@ function ReplayCard({
       {/* Slideable carousel — one frame at a time, revealed on demand */}
       {open && cur && (
         <div className="mt-3">
-          <div className="relative overflow-hidden rounded-lg border border-hairline bg-field">
-            {src ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={src}
-                alt={`${cur.step_key} as ${persona} saw it`}
-                className="h-[320px] w-full object-cover object-top"
-                style={{ filter: filter || undefined }}
-              />
-            ) : (
+          <div className="relative h-[320px] overflow-hidden rounded-lg border border-hairline bg-field">
+            {/* All frames stay mounted and stacked — only the current one is visible.
+                Slides toggle opacity instead of swapping src, so there is no refetch. */}
+            {clip.frames.map((f, i) => {
+              const u = mediaUrl(f.screenshot_url);
+              if (!u) return null;
+              return (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={i}
+                  src={u}
+                  alt={`${f.step_key} as ${persona} saw it`}
+                  className={`absolute inset-0 h-full w-full object-contain object-top transition-opacity ${i === curIdx ? "opacity-100" : "opacity-0"}`}
+                  style={{ filter: filter || undefined }}
+                />
+              );
+            })}
+            {!src && (
               <div className="flex h-[320px] items-center justify-center text-[12px] text-tertiary">no frame</div>
             )}
             {n > 1 && (

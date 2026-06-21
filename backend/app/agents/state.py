@@ -41,7 +41,9 @@ class PersonaInput(TypedDict, total=False):
     thresholds: PersonaThresholds
     requires_labels: bool
     target_url: str
-    flow: list[FlowStep]
+    flow: list[FlowStep]             # scripted steps; empty => autonomous (goal-driven)
+    goal: str                        # high-level task for autonomous exploration
+    max_steps: int                   # safety cap on the autonomous loop
     viewport: str
     seed: int                        # per-persona seed+i — determinism under Send concurrency
     artifact_dir: Optional[str]
@@ -68,6 +70,15 @@ class PersonaState(PersonaInput, total=False):
     steps: Annotated[list[StepSignals], operator.add]
     shots: Annotated[list[Optional[str]], operator.add]
 
+    # Autonomous-loop control (single-writer per superstep — NOT operator.add, the loop
+    # is sequential within one persona; each node returns the full updated list).
+    step_count: int                  # monotonic actions taken (autonomous + scripted cursor)
+    action_history: list             # [{"screen_key","key","action","role","name","reason"}] planner context
+    seen_signatures: list            # screen-key-qualified signatures attempted, for cycle detection
+    current_action: dict             # the planner's chosen action for this superstep
+    last_url: str                    # screen_key axe/grade were last captured on (re-run when it changes)
+    current_screen_key: str          # "{url}#{aria_hash}" — unique per screen content, not just URL
+
     # Per-step scratch passed between observe→comprehend→decide→act.
     # MUST be declared: LangGraph drops undeclared keys returned by nodes.
     current_shot: Optional[str]
@@ -75,7 +86,10 @@ class PersonaState(PersonaInput, total=False):
     current_dwell: float
     current_retries: int
     current_label_block: bool
-    current_give_up: bool
+    current_give_up: bool                # scripted-mode terminal block (dwell over threshold)
+    current_dwell_giveup: bool           # autonomous: dwell barrier — a finding, but keep exploring
+    current_cycle: bool                  # autonomous: action already tried on this screen (loop guard)
+    current_over_cap: bool               # autonomous: step budget exhausted — terminate exploration
     last_confusion: float
     last_fallback: Optional[str]
     last_reason: str
@@ -106,7 +120,9 @@ class RunState(TypedDict, total=False):
     target_url: str
     viewport: str
     personas: list[dict]             # resolved persona configs (name + behavior + thresholds)
-    flow: list[FlowStep]
+    flow: list[FlowStep]             # scripted steps; empty => autonomous (goal-driven)
+    goal: str                        # high-level task for autonomous exploration
+    max_steps: int                   # safety cap on the autonomous loop
     seed: int
     artifact_root: Optional[str]
     run_at: str                      # ISO-8601, set by init

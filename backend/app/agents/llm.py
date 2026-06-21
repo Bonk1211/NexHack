@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +54,18 @@ class SynthesisResult(BaseModel):
     rollup: str = Field(description="the one business line — who is silently excluded (§18)")
     narrative: str = Field(description="2-3 sentence audit-style summary")
     key_exclusions: list[str] = Field(default_factory=list)
+
+
+class AgentAction(BaseModel):
+    """The planner's chosen next action in autonomous exploration (§8 agent loop)."""
+    action: str = Field(description="'click' | 'fill' | 'navigate_back' | 'done' | 'blocked'")
+    role: str = Field(default="", description="a11y role to target, e.g. 'button','textbox','combobox','switch'")
+    name: str = Field(default="", description="accessible name to match")
+    nth: int = Field(default=0, description="0-based index among same-role controls when name is missing/ambiguous")
+    value: str = Field(default="", description="text to type ('fill' on textbox) or option label ('fill' on combobox)")
+    key: str = Field(default="", description="stable step label, e.g. 'click:Submit'")
+    confusion: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = Field(default="")
 
 
 # --- Client factory ---------------------------------------------------------
@@ -174,6 +187,345 @@ def vision_judge(
         # Degrade to the heuristic, but LOG it — a bad/expired key or misconfigured
         # endpoint must not be silently indistinguishable from running offline.
         logger.warning("comprehend LLM call failed (%s: %s); using offline heuristic",
+                       type(exc).__name__, exc)
+        return fallback
+
+
+# --- plan_action (per-step autonomous nav) ----------------------------------
+
+_PLAN_SYSTEM = (
+    "You are simulating ONE user persona performing a deep functional test of a mobile "
+    "web app. Follow this two-pass strategy:\n\n"
+    "PASS 1 — PRIMARY FLOW (walk every screen in sequence):\n"
+    "  Fill all required input fields with realistic test data, then click the PRIMARY "
+    "  navigation control (the main CTA — 'Continue', 'Next', 'Submit', 'Verify', 'Sign "
+    "  Up', 'Pay', 'Confirm', 'Finish', etc.) to advance to the next screen. NEVER click "
+    "  shortcuts that skip screens ('Skip for now', 'Skip', 'Skip this step', etc.) on the "
+    "  first pass — they bypass intermediate screens that must be tested. Keep advancing "
+    "  until you reach the END state: a success / confirmation / completion screen (a "
+    "  dashboard, home, feed, account/profile page, or a 'You're in' / 'Welcome' / "
+    "  'Success' / 'Thank you' / 'Order placed' / 'Payment successful' / 'Application "
+    "  submitted' / rewards / receipt screen with no further required step).\n\n"
+    "PASS 2 — SECONDARY EXPLORATION (use navigate_back to revisit each screen):\n"
+    "  After reaching the final screen, navigate_back through each screen and test the "
+    "  secondary controls you skipped: 'Resend OTP', 'Help', 'Cancel', 'Skip for now', "
+    "  toggles, links, carousels, icon buttons. Test them one at a time.\n\n"
+    "Given the current a11y tree and actions already taken, choose the SINGLE next action. "
+    "Respond ONLY with a JSON object of exactly this shape:\n"
+    '{"action":"click|fill|navigate_back|done|blocked","role":"","name":"","nth":0,'
+    '"value":"","key":"","confusion":0.0,"reason":""}.\n'
+    "  'fill'  — for a text input (role textbox/searchbox/spinbutton) set value to realistic, "
+    "TYPE-APPROPRIATE data: a phone field gets digits, an email field gets name@example.com, "
+    "a name field gets a full name, an OTP/code field gets the code shown in any on-screen hint. "
+    "Also use 'fill' for a dropdown (role combobox/listbox): set value to one of its option "
+    "labels (never leave a select on its placeholder).\n"
+    "  'click' — press a button/link, or flip a switch/checkbox/radio.\n"
+    "  'navigate_back' — go back one screen to test secondary controls (role/name/value ignored).\n"
+    "  'done'  — ONLY after both passes are complete across every screen.\n"
+    "  'blocked' — only if completely stuck and navigate_back cannot help.\n"
+    "TARGETING: prefer the accessible 'name'. When a control has NO name or shares its name "
+    "with others (e.g. several unlabeled dropdowns or switches), set 'nth' to its 0-based "
+    "position among controls of the SAME role in tree order (1st=0, 2nd=1, ...).\n"
+    "If you clicked the primary CTA but the screen did not change, a required field is "
+    "invalid or empty — read the error text and fix that field before retrying.\n"
+    "confusion 0.0 = obvious, 1.0 = genuinely unclear. "
+    "Set key like 'click:Continue' or 'fill:Mobile Number' (action:Name)."
+)
+
+# Parse an aria_snapshot's "- role \"name\"" lines, in stable tree order.
+_ARIA_LINE = re.compile(r'^\s*-\s+(?P<role>[a-z]+)(?:\s+"(?P<name>[^"]*)")?', re.MULTILINE)
+
+# Interaction taxonomy — how a human tester drives each control TYPE (validated live
+# against BrewPoints): text inputs get typed, native selects get an option chosen,
+# toggles get clicked to flip, buttons/links get clicked (and may navigate).
+_FILL_ROLES = ("textbox", "searchbox", "spinbutton")          # .fill()
+_SELECT_ROLES = ("combobox", "listbox")                       # .select_option()  NOT .fill()
+_TOGGLE_ROLES = ("switch", "checkbox", "radio")               # .click() to flip, stays on screen
+_BUTTON_ROLES = ("button", "tab", "menuitem")                 # .click(), may advance
+_LINK_ROLES = ("link",)                                       # .click(), often secondary/skip
+_INTERACTIVE = _FILL_ROLES + _SELECT_ROLES + _TOGGLE_ROLES + _BUTTON_ROLES + _LINK_ROLES
+
+# On-screen hint like "the code is 1234" / "OTP: 482913" — read it like a human would.
+_CODE_HINT = re.compile(r'(?:code|otp|pin|password)\D{0,24}(\d{3,8})', re.I)
+
+# Shortcut controls that BYPASS screens — never auto-followed on the forward walk.
+_SKIP_TOKENS = ("skip", "maybe later", "not now", "no thanks", "do it later", "remind me later")
+
+
+def _parse_aria_controls(aria: str) -> list[tuple[str, str, int]]:
+    """(role, accessible-name, nth) for each control in tree order.
+
+    `nth` is the 0-based occurrence of that ROLE so far — this is what lets the agent
+    target unnamed duplicates (the 3 birthday <select>s, the 4 permission switches) by
+    position via Playwright's get_by_role(role).nth(n), exactly as a human disambiguates
+    them visually.
+    """
+    out: list[tuple[str, str, int]] = []
+    per_role: dict[str, int] = {}
+    for m in _ARIA_LINE.finditer(aria or ""):
+        role = m.group("role")
+        nth = per_role.get(role, 0)
+        per_role[role] = nth + 1
+        out.append((role, m.group("name") or "", nth))
+    return out
+
+
+def _verb_for(role: str) -> str:
+    """The interaction verb the planner emits for a control role (fill | click)."""
+    return "fill" if role in _FILL_ROLES or role in _SELECT_ROLES else "click"
+
+
+# A screen's IDENTITY skeleton: its interactive controls + headings, ignoring volatile
+# value/text nodes. Typing into a field adds a text node and would otherwise change the
+# screen hash on every keystroke, resetting per-screen progress — so we key off structure.
+_SKELETON_ROLES = frozenset(_INTERACTIVE + ("heading",))
+
+
+# Digit/number runs in a control NAME are volatile: OTP "Resend in 29s" countdowns,
+# cart counts, timers. Left in the skeleton they churn the screen hash every second and
+# defeat the cycle guard (the agent thinks each tick is a brand-new screen). Mask them
+# for IDENTITY only — targeting still uses the real name.
+_VOLATILE_NUM = re.compile(r"\d+")
+
+
+def _screen_skeleton(aria: str) -> list[tuple[str, str]]:
+    """Stable (role, name) skeleton identifying THIS screen (filled values + live counters
+    excluded) — see _VOLATILE_NUM for why numbers are masked out of the name."""
+    return [(r, _VOLATILE_NUM.sub("#", n))
+            for r, n, _ in _parse_aria_controls(aria) if r in _SKELETON_ROLES]
+
+
+def _action_signature(a: dict) -> str:
+    """Stable per-control signature for cycle/dedup: action:role:name:nth (case-insensitive)."""
+    return (f"{a.get('action')}:{a.get('role') or ''}:"
+            f"{a.get('name') or ''}:{a.get('nth') or 0}").lower()
+
+
+def _control_signature(role: str, name: str, nth: int) -> str:
+    """The signature a control WOULD have once tested (verb derived from its role)."""
+    return f"{_verb_for(role)}:{role}:{name}:{nth}".lower()
+
+
+def _example_from_placeholder(ph: str) -> str:
+    """A field's placeholder is the app author's OWN valid example — use it when it is a
+    concrete value (email or phone/number with real digits), not a format mask or
+    instruction. This is what makes format-strict fields pass (e.g. BrewPoints wants
+    '12-345 6789', not '0123456789'). Returns '' when the placeholder is unusable."""
+    ph = (ph or "").strip()
+    for pre in ("e.g.", "eg.", "ex.", "ex:", "example:", "i.e."):
+        if ph.lower().startswith(pre):
+            ph = ph[len(pre):].strip()
+            break
+    if "@" in ph and "." in ph.split("@")[-1]:
+        return ph                                       # concrete email example
+    if sum(c.isdigit() for c in ph) >= 3 and re.fullmatch(r"[0-9 +()\-]+", ph):
+        return ph                                       # concrete phone/number (digits+separators only)
+    return ""                                            # mask ("DD/MM/YYYY") or instruction ("Enter code")
+
+
+# Ordered (keywords -> value) table for realistic test data. FIRST match wins, so more
+# specific terms come before generic ones (e.g. "username"/"first name" before "name").
+# Extend this list to teach the agent a new field type — that's the whole knob.
+_VALUE_MAP: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("email", "e-mail", "emel"), "test@example.com"),
+    (("cvv", "cvc", "security code", "card verification"), "123"),
+    (("card number", "card no", "credit card", "debit card", "pan"), "4111111111111111"),
+    (("expiry", "expiration", "exp date", "mm/yy", "valid thru"), "12/30"),
+    (("phone", "mobile", "tel", "whatsapp", "contact number", "contact no", "hp"), "0123456789"),
+    (("mykad", "nric", "ic number", "no. mykad", "passport", "identity", "national id"), "901234567890"),
+    (("confirm password", "retype password", "re-enter password"), "Test1234!"),
+    (("password", "passcode", "kata laluan"), "Test1234!"),
+    (("username", "user name", "userid", "user id", "login id", "handle"), "testuser"),
+    (("first name", "given name", "nama pertama"), "Test"),
+    (("last name", "surname", "family name", "nama keluarga"), "User"),
+    (("full name", "name", "nama"), "Test User"),
+    (("company", "organi", "business name", "employer", "syarikat"), "Test Sdn Bhd"),
+    (("occupation", "job title", "profession", "position", "pekerjaan"), "Engineer"),
+    (("country", "negara"), "Malaysia"),
+    (("state", "negeri", "province"), "Selangor"),
+    (("city", "bandar", "town"), "Kuala Lumpur"),
+    (("postcode", "postal", "zip", "poskod"), "50000"),
+    (("address", "alamat", "street", "jalan"), "123 Jalan Test, Kuala Lumpur"),
+    (("gender", "jantina"), "Male"),
+    (("age", "umur"), "25"),
+    (("date", "birthday", "dob", "tarikh lahir"), "1995-06-15"),
+    (("url", "website", "link"), "https://example.com"),
+    (("coupon", "promo", "voucher", "referral", "discount code"), "TEST10"),
+    (("search", "cari", "find"), "coffee"),
+    (("message", "comment", "description", "notes", "feedback", "review", "bio", "about"),
+     "This is a test message."),
+    (("amount", "quantity", "qty", "price", "salary", "income", "number of"), "10"),
+)
+
+
+def _smart_value(role: str, name: str, aria: str = "") -> str:
+    """Realistic, type-appropriate test data — what a human enters so validation passes.
+
+    Generic across projects: keys off the field's accessible name (and the on-screen OTP
+    hint), not any one app's wording. Falls back to a benign alphanumeric string.
+    """
+    n = (name or "").lower()
+
+    def _otp() -> str:
+        # Code = on-screen hint if any, else the standard test code 1234. For a per-digit
+        # box ("Digit 3") return JUST that digit — a 1-char field keeps only its first char,
+        # so dumping the whole code into every box yields 1111 and fails (the real-app bug).
+        hint_m = _CODE_HINT.search(aria or "")
+        code = hint_m.group(1) if hint_m else "1234"
+        dm = re.search(r"(\d+)", n)
+        if dm:
+            i = int(dm.group(1)) - 1
+            if 0 <= i < len(code):
+                return code[i]
+        return code
+
+    # 1) unambiguous OTP/verification fields.
+    if any(k in n for k in ("otp", "verification code", "verify code", "one-time", "digit")):
+        return _otp()
+    # 2) specific named fields (CVV/coupon/etc. own their "...code" before the bare fallback).
+    for keys, val in _VALUE_MAP:
+        if any(k in n for k in keys):
+            return val
+    # 3) a bare "code"/"pin" field left over => treat as OTP-style.
+    if re.search(r"\bcode\b", n) or re.search(r"\bpin\b", n):
+        return _otp()
+    if role == "spinbutton":
+        return "10"
+    return "Test123"
+
+
+def _screen_control_status(aria: str, history: list[dict], current_screen_key: str):
+    """Split the current screen's controls into (untested, tested) (role, name, nth) lists.
+
+    This is what gives the agent *awareness*: instead of re-deriving "what have I done
+    here" from a truncated action log, the planner is handed an explicit per-screen
+    checklist of remaining work, scoped to THIS exact screen_key.
+    """
+    if current_screen_key:
+        done = {_action_signature(h) for h in history
+                if h.get("screen_key", "") == current_screen_key}
+    else:
+        done = {_action_signature(h) for h in history}
+    untested, tested = [], []
+    for role, name, nth in _parse_aria_controls(aria):
+        if role not in _INTERACTIVE:
+            continue
+        bucket = tested if _control_signature(role, name, nth) in done else untested
+        bucket.append((role, name, nth))
+    return untested, tested
+
+
+def _heuristic_explore(aria: str, history: list[dict], rng, *,
+                       current_screen_key: str = "") -> AgentAction:
+    """Deterministic offline planner (§16/§22) that mirrors a careful human tester:
+
+      1. fill every text input + choose an option in every <select>,
+      2. flip every toggle/checkbox/radio (in-place, safe),
+      3. click the primary button (the CTA that advances),
+      4. only then follow secondary links (Skip/Help),
+      5. when the screen is exhausted, navigate back to explore elsewhere, else done.
+
+    Each pass picks the FIRST control of that class not yet tested on THIS screen, using
+    type-correct values and nth-based targeting. Fully deterministic (network-free, §22).
+    """
+    _ = rng  # reserved; offline path is deterministic on the (stable) tree order
+    if current_screen_key:
+        done = {_action_signature(h) for h in history
+                if h.get("screen_key", "") == current_screen_key}
+    else:
+        done = {_action_signature(h) for h in history}
+    controls = _parse_aria_controls(aria)
+
+    def pick(roles, reason):
+        for role, name, nth in controls:
+            if role not in roles:
+                continue
+            # Never auto-follow a "Skip" shortcut on the forward walk — it bypasses the
+            # very screens we must test (OTP, profile). Backtracking covers other paths.
+            if any(t in name.lower() for t in _SKIP_TOKENS):
+                continue
+            verb = _verb_for(role)
+            if f"{verb}:{role}:{name}:{nth}".lower() in done:
+                continue
+            value = _smart_value(role, name, aria) if (verb == "fill" and role in _FILL_ROLES) else ""
+            return AgentAction(action=verb, role=role, name=name, nth=nth, value=value,
+                               key=f"{verb}:{name or role}#{nth}", reason=reason)
+        return None
+
+    chosen = (
+        pick(_FILL_ROLES + _SELECT_ROLES, "offline: fill/select input")
+        or pick(_TOGGLE_ROLES, "offline: toggle control")
+        or pick(_BUTTON_ROLES, "offline: primary action / advance")
+        or pick(_LINK_ROLES, "offline: secondary link")
+    )
+    if chosen is not None:
+        return chosen
+    # Current screen fully exercised — back out to explore other paths, once per screen.
+    nav_sig = _action_signature({"action": "navigate_back"})
+    if nav_sig not in done and history:
+        return AgentAction(action="navigate_back", key="navigate_back",
+                           reason="offline: screen exhausted, exploring back")
+    return AgentAction(action="done", key="done", reason="offline: all reachable screens exhausted")
+
+
+def plan_action(aria: str, goal: str, history: list[dict], rng, *,
+                current_screen_key: str = "") -> AgentAction:
+    """The `plan` node's work: choose the next action from the live a11y tree (§8).
+
+    Offline (no key) or on any failure, returns the deterministic heuristic explorer so a
+    run never depends on the network (§16/§22).
+    """
+    fallback = _heuristic_explore(aria, history, rng, current_screen_key=current_screen_key)
+    client = _client(settings.llm_model_step)
+    if client is None or not aria:
+        return fallback
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Give the agent an explicit per-screen checklist so it KNOWS what is left to
+        # test on this screen rather than re-inferring it from a truncated action log.
+        untested, tested = _screen_control_status(aria, history, current_screen_key)
+
+        def _fmt(items):
+            parts = []
+            for r, n, i in items:
+                label = f'{r} "{n}"' if n else r
+                parts.append(f"{label} (nth={i})" if not n or i > 0 else label)
+            return ", ".join(parts)
+
+        untested_str = _fmt(untested) or "(none — screen exhausted)"
+        tested_str = _fmt(tested) or "(none yet)"
+        # Distinct screens already visited — lets the agent gauge overall progress in PASS 2.
+        screens_visited = len({h.get("screen_key", "") for h in history if h.get("screen_key")})
+
+        human = HumanMessage(content=(
+            f"GOAL: {goal}\n"
+            f"Distinct screens visited so far: {screens_visited}\n"
+            f"UNTESTED controls on THIS screen (test these before leaving): {untested_str}\n"
+            f"Already-tested controls on THIS screen: {tested_str}\n"
+            f"Recent actions (most recent last): {json.dumps(history[-15:])}\n"
+            f"Accessibility tree:\n{aria[:4000]}\n"
+            "Pick the SINGLE next action. On the forward pass: first fill inputs and toggle "
+            "any switches/checkboxes/radios (these stay on the screen), then click the PRIMARY "
+            "CTA to advance — never a 'Skip' shortcut. Save ambiguous secondary buttons/links "
+            "(Help, Resend, Skip) for the backtrack pass. If this screen has no untested "
+            "controls left and you have reached the final screen, navigate_back to test what "
+            "you saved. Respond in JSON."
+        ))
+        ai = client.invoke(
+            [SystemMessage(content=_PLAN_SYSTEM), human],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(model_name or settings.llm_model_step, prompt_tokens, completion_tokens)
+
+        payload = json.loads(_extract_text(ai.content))
+        return AgentAction.model_validate(payload)
+    except Exception as exc:
+        logger.warning("plan_action LLM call failed (%s: %s); using offline explorer",
                        type(exc).__name__, exc)
         return fallback
 
