@@ -50,6 +50,7 @@ class PersonaInput(TypedDict, total=False):
     goal: str                        # e.g. "claim a reward on BrewPoints"
     hints: dict                      # values agent must use: {"phone": "...", "otp": "..."}
     success_url: str                 # URL suffix that means goal achieved, e.g. "/rewards"
+    success_element: str             # a11y text that means goal achieved, e.g. 'heading "Welcome"'
 
 
 class PersonaState(PersonaInput, total=False):
@@ -126,6 +127,7 @@ class RunState(TypedDict, total=False):
     goal: str
     hints: dict
     success_url: str
+    success_element: str
 
     # Fan-in reducer: each Send-spawned persona subgraph contributes one entry
     persona_results: Annotated[list[PersonaRunRaw], operator.add]

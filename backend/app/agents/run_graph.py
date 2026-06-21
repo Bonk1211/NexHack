@@ -101,6 +101,7 @@ def fan_out(state: RunState) -> list[Send]:
             "goal": state.get("goal", ""),
             "hints": state.get("hints") or {},
             "success_url": state.get("success_url", ""),
+            "success_element": state.get("success_element", ""),
         }
         sends.append(Send("persona", payload))
     return sends
@@ -214,6 +215,7 @@ def run_assessment(
     goal: str = "",
     hints: dict | None = None,
     success_url: str = "",
+    success_element: str = "",
 ) -> dict:
     """Run one assessment across personas via the map-reduce graph; return the pack.
 
@@ -237,6 +239,7 @@ def run_assessment(
         "goal": goal,
         "hints": hints or {},
         "success_url": success_url,
+        "success_element": "",
     }
 
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer

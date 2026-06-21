@@ -26,6 +26,11 @@ def run_assessment(
     seed: int = 1337,
     artifact_root: str | None = None,
     run_id: str | None = None,
+    autonomous: bool = False,
+    goal: str = "",
+    hints: dict | None = None,
+    success_url: str = "",
+    success_element: str = "",
 ) -> dict:
     """Run one assessment across personas and return the §13 evidence pack.
 
@@ -41,4 +46,9 @@ def run_assessment(
         seed=seed,
         artifact_root=artifact_root,
         run_id=run_id,
+        autonomous=autonomous,
+        goal=goal,
+        hints=hints,
+        success_url=success_url,
+        success_element=success_element,
     )

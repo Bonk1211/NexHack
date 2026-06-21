@@ -60,7 +60,7 @@ def _resolve_flow(app_name: str) -> dict:
     try:
         from app.db import get_client
         client = get_client()
-        apps = client.table("apps").select("id, goal, success_url, flow_steps").eq("name", app_name).limit(1).execute().data or []
+        apps = client.table("apps").select("id, goal, success_url, success_element, flow_steps").eq("name", app_name).limit(1).execute().data or []
         if not apps:
             logger.info("_resolve_flow: no app found for '%s', using DEFAULT_FLOW", app_name)
             return {"autonomous": False, "flow": DEFAULT_FLOW}
@@ -71,12 +71,15 @@ def _resolve_flow(app_name: str) -> dict:
         # Priority 1: goal column → autonomous mode
         if goal:
             success_url = app.get("success_url") or ""
-            logger.info("_resolve_flow: app '%s' using autonomous mode, goal='%s', success_url='%s'", app_name, goal, success_url)
+            success_element = app.get("success_element") or ""
+            logger.info("_resolve_flow: app '%s' using autonomous mode, goal='%s', success_url='%s', success_element='%s'",
+                       app_name, goal, success_url, success_element[:60] if success_element else "")
             return {
                 "autonomous": True,
                 "goal": goal,
                 "hints": {},
                 "success_url": success_url,
+                "success_element": success_element,
                 "flow": [],
             }
         
@@ -309,6 +312,7 @@ def start_run(req: StartRunRequest) -> dict:
             goal=flow_cfg.get("goal", ""),
             hints=flow_cfg.get("hints") or {},
             success_url=flow_cfg.get("success_url", ""),
+            success_element=flow_cfg.get("success_element", ""),
         )
 
         # Serialize usage first so it persists onto the run row (dashboard §3.2).
@@ -411,6 +415,7 @@ def stream_run(
                     "goal": flow_cfg.get("goal", ""),
                     "hints": flow_cfg.get("hints") or {},
                     "success_url": flow_cfg.get("success_url", ""),
+                    "success_element": flow_cfg.get("success_element", ""),
                 }
                 q.put({"type": "persona_start", "persona": name, "idx": i,
                        "label": cfg.get("name", name)})
@@ -423,7 +428,24 @@ def stream_run(
 
                 steps, shots = [], []
                 for node, data in stream_persona(payload, on_frame=on_frame):
-                    if node == "observe":
+                    if node == "agent":
+                        # MCP agent — emits multiple steps per graph node invocation.
+                        agent_steps = data.get("steps") or []
+                        agent_shots = data.get("shots") or []
+                        for s in agent_steps:
+                            steps.append(s)
+                            si = s.step_idx
+                            shot = agent_shots[si] if si < len(agent_shots) else None
+                            if shot:
+                                shots.append(shot)
+                            q.put({"type": "step", "scope": "persona", "persona": name,
+                                   "node": "agent", "step_idx": s.step_idx,
+                                   "step_key": s.step_key, "status": _step_status(s),
+                                   "confusion": s.llm_confusion, "dwell_s": s.dwell_s,
+                                   "output": {"step": s.step_key, "status": _step_status(s),
+                                              "dead_end": s.dead_end, "completed": s.completed},
+                                   "screenshot_url": _to_served_url(shot)})
+                    elif node == "observe":
                         q.put({"type": "node", "scope": "persona", "persona": name,
                                "node": "observe", "step_idx": len(steps),
                                "output": {"captured": f"step {len(steps)} screen + a11y tree"},

@@ -34,7 +34,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy
 from playwright.sync_api import sync_playwright
 
-from app.agents.llm import agent_decide, vision_judge
+from app.agents.llm import run_agent, vision_judge
 from app.agents.navigator import (
     FlowStep,
     JourneyResult,
@@ -92,31 +92,9 @@ def observe(state: PersonaState) -> dict:
 
 
 def comprehend(state: PersonaState) -> dict:
-    """The one LLM node: per-screen confusion judgment + nav fallback (stream B).
-
-    In autonomous mode: calls agent_decide to produce the next action from the a11y
-    tree and goal context. In scripted mode: calls vision_judge as before.
-    """
+    """Scripted-mode LLM node: per-screen confusion judgment (stream B)."""
     aria = state.get("aria", "")
     requires_labels = state.get("requires_labels", False)
-
-    if state.get("autonomous"):
-        action = agent_decide(
-            goal=state.get("goal", ""),
-            hints=state.get("hints") or {},
-            success_url=state.get("success_url", ""),
-            current_url=state.get("current_url", ""),
-            aria_excerpt=aria,
-            requires_labels=requires_labels,
-        )
-        return {
-            "last_action": action.model_dump(),
-            "last_confusion": action.confusion,
-            "last_reason": action.reasoning,
-            "last_fallback": None,
-            "current_labeled": True,
-        }
-
     fs: FlowStep = state["flow"][state["step_idx"]]
     labeled = _role_has_name(aria, fs.role) if fs.role else True
     j = vision_judge(
@@ -331,22 +309,68 @@ def act(state: PersonaState) -> dict:
     return out
 
 
+def agent(state: PersonaState) -> dict:
+    """MCP-style autonomous agent: LLM with Playwright tools in a multi-turn loop.
+
+    Replaces comprehend→decide→act for autonomous mode. The agent receives the a11y
+    tree, makes an LLM call to decide an action, executes it via Playwright, feeds
+    the result back (including error details with available element names), and
+    repeats until done/blocked/max-turns. All regex fallbacks eliminated.
+    """
+    result = run_agent(
+        page=state["page"],
+        goal=state.get("goal", ""),
+        hints=state.get("hints") or {},
+        success_url=state.get("success_url", ""),
+        success_element=state.get("success_element", ""),
+        aria=state.get("aria", ""),
+        requires_labels=state.get("requires_labels", False),
+        behavior_profile=_bp(state),
+        wcag=state.get("wcag", ()),
+        grade=state.get("grade"),
+        word_count=state.get("word_count", 1),
+        rng=state["rng"],
+        artifact_dir=state.get("artifact_dir"),
+        current_url=state.get("current_url", ""),
+        url_visit_counts=state.get("url_visit_counts") or {},
+        step_idx=state["step_idx"],
+    )
+    # Merge accumulated steps and shots into the state reducers
+    out = dict(result)
+    # route_next reads "status"; shot/step reducers use operator.add
+    return out
+
+
 def route_next(state: PersonaState) -> str:
     """Emergent exit: loop while running, else END (blocked | completed)."""
     return "observe" if state.get("status") == "running" else END
 
 
+def _route_after_observe(state: PersonaState) -> str:
+    """Autonomous mode → agent node; scripted mode → comprehend pipeline."""
+    return "agent" if state.get("autonomous") else "comprehend"
+
+
 def build_persona_graph():
-    """Compile the cyclic persona subgraph."""
+    """Compile the cyclic persona subgraph with dual-mode support.
+
+    Autonomous: load → observe → agent ──────→ route_next → observe (loop) or END
+    Scripted:   load → observe → comprehend → decide → act → route_next → observe or END
+    """
     g = StateGraph(PersonaState)
     g.add_node("load", load)
-    g.add_node("observe", observe, retry_policy=RetryPolicy(max_attempts=3))  # transient capture only
+    g.add_node("observe", observe, retry_policy=RetryPolicy(max_attempts=3))
+    g.add_node("agent", agent, retry_policy=RetryPolicy(max_attempts=2))       # MCP-style
     g.add_node("comprehend", comprehend)
     g.add_node("decide", decide)
-    g.add_node("act", act, retry_policy=RetryPolicy(max_attempts=3))          # transient PW only
+    g.add_node("act", act, retry_policy=RetryPolicy(max_attempts=3))
     g.set_entry_point("load")
     g.add_edge("load", "observe")
-    g.add_edge("observe", "comprehend")
+    g.add_conditional_edges("observe", _route_after_observe, {
+        "agent": "agent",
+        "comprehend": "comprehend",
+    })
+    g.add_conditional_edges("agent", route_next, {"observe": "observe", END: END})
     g.add_edge("comprehend", "decide")
     g.add_edge("decide", "act")
     g.add_conditional_edges("act", route_next, {"observe": "observe", END: END})

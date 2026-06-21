@@ -28,12 +28,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.llm_usage import record_usage
+from app.scoring.engine import StepSignals
 
 logger = logging.getLogger(__name__)
 
@@ -190,130 +190,336 @@ def vision_judge(
         return fallback
 
 
-# --- agent_decide (autonomous goal-directed navigation) ---------------------
+# --- MCP-style autonomous agent ----------------------------------------------
+# Replaces the single-shot agent_decide + regex fallbacks with a multi-turn
+# conversation loop. The LLM writes raw Playwright Python executed against the
+# live page — one `exec` tool replaces all hardcoded action types, locator
+# strategies, and per-site patches.
 
-_AGENT_SYSTEM = (
-    "You are simulating a user persona navigating a mobile web app toward a specific goal. "
-    "You perceive the page only through its accessibility tree — exactly as a screen reader would. "
-    "Decide the single best NEXT action to take toward the goal. "
-    "Respond ONLY with a JSON object of exactly this shape: "
-    '{"step_label": "<concise label>", "action": "fill|click|done|blocked", '
-    '"role": "<a11y role>", "name": "<exact accessible name from tree>", '
-    '"value": "<text to type if fill, else empty>", '
-    '"confusion": <0.0-1.0>, "reasoning": "<one sentence>"}. '
-    'Use "done" if the goal is achieved or the success URL pattern is visible. '
-    'CRITICAL — use "blocked" ONLY when there are literally zero actionable elements on the page. '
-    'Confusing, misleading, or double-negative labels are NOT a reason to return "blocked" — '
-    'capture your confusion in the confusion score (0.7–1.0) and still choose an action. '
-    'BEFORE returning "blocked", you MUST check for a primary action button: any button whose '
-    'name contains Finish, Continue, Next, Submit, Done, Proceed, Confirm, OK, or Skip. '
-    'If such a button exists, click it — even if you cannot understand the surrounding content. '
-    'The "name" field must exactly match an accessible name visible in the tree. '
-    "confusion 0.0 = obvious next step, 1.0 = page is confusing but you are still acting. "
-    "NAVIGATION RULES: "
-    "1) When you see individual OTP digit fields labeled 'Digit 1', 'Digit 2' etc., "
-    "fill each one with the corresponding digit from the hint value (e.g. hint 'otp=1234' "
-    "→ fill Digit 1 with '1', Digit 2 with '2', etc.). If no OTP hint is provided, "
-    "look for a 'Skip for now' link or 'Verify' button and use it — do NOT re-type a "
-    "phone number into an OTP field. "
-    "2) Only return 'done' when the current URL actually matches the success URL pattern. "
-    "If you are not at the target page, keep navigating — 'done' on the wrong page is the "
-    "same as giving up."
+_MCP_SYSTEM = (
+    "You are a user persona navigating a mobile web app to reach a specific goal. "
+    "You perceive the page through its accessibility tree — exactly as a screen reader would. "
+    "You have FULL control of the browser via a Playwright `page` object (sync API).\n\n"
+    "Respond with ONE of these JSON forms:\n\n"
+    '  {"exec": "<Playwright Python code>", "step_label": "<what you just did>", '
+    '"confusion": <0.0-1.0>, "reasoning": "<one sentence>"}\n\n'
+    '  {"done": true, "reasoning": "<why goal is achieved>"}\n\n'
+    '  {"blocked": true, "reasoning": "<why no path forward>"}\n\n'
+    "The `page` object is in scope. You can call any sync Playwright method on it:\n"
+    "  page.get_by_role('textbox', name='Mobile Number').fill('0123456789')\n"
+    "  page.get_by_role('button', name='Continue').click()\n"
+    "  page.get_by_label('Year').select_option('1990')\n"
+    "  page.locator('#outlet').select_option('KLCC')\n"
+    "  page.locator('select').first.select_option('1990')\n"
+    "  page.keyboard.press('Enter')\n"
+    "  page.get_by_role('switch', name='Promos').check()\n"
+    "  page.wait_for_load_state('networkidle')\n"
+    "  page.url  (read current URL)\n\n"
+    "RULES:\n"
+    "1. Use the EXACT accessible names shown in the a11y tree. If an action fails, "
+    "the error will show available element names — use them in your next attempt.\n"
+    "2. Use `done` ONLY when the goal is achieved or success URL is visible.\n"
+    "3. Use `blocked` ONLY after trying genuinely different approaches — "
+    "a name mismatch is a reason to try again, not to give up.\n"
+    "4. For OTP: fill individual 'Digit N' fields one at a time.\n"
+    "5. For dropdowns: use select_option() on the element directly — try "
+    "get_by_label, then get_by_role, then locator.\n"
+    "6. Confusion 0.0=obvious, 1.0=very confused but keep trying."
 )
 
-# Deterministic CTA fallback: matches primary action buttons by name keyword.
-# Used to override an LLM "blocked" verdict when a clear forward path exists in the tree.
-_CTA_PATTERN = re.compile(
-    r'button "([^"]*(?:Finish|Continue|Next|Submit|Done|Proceed|Confirm|Okay|OK|Skip)[^"]*)"',
-    re.IGNORECASE,
+# Whitelist of safe page methods for exec(). The LLM can only call methods
+# on the page object, not import modules or access the filesystem.
+_EXEC_GLOBALS = {
+    "__builtins__": {
+        "True": True, "False": False, "None": None,
+        "str": str, "int": int, "float": float, "list": list, "dict": dict,
+    },
+}
+
+_PLAY_SNAPSHOT = (
+    "def snapshot(page):\n"
+    "    return page.locator('body').aria_snapshot()\n"
 )
 
 
-def _find_cta(aria: str) -> "AgentAction | None":
-    """Scan the a11y tree for a primary CTA button. Returns an AgentAction or None."""
-    m = _CTA_PATTERN.search(aria)
-    if not m:
-        return None
-    name = m.group(1)
-    return AgentAction(
-        step_label=f"click primary CTA: {name}",
-        action="click",
-        role="button",
-        name=name,
-        value="",
-        confusion=0.8,  # high — page was confusing enough that LLM nearly blocked
-        reasoning=f"Deterministic CTA fallback: clicking '{name}' to proceed past confusing page",
-    )
+def _play_exec(page, code: str) -> str:
+    """Execute the LLM's Playwright code against the live page. Returns result/error."""
+    import traceback
 
-
-def agent_decide(
-    goal: str,
-    hints: dict,
-    success_url: str,
-    current_url: str,
-    aria_excerpt: str,
-    *,
-    requires_labels: bool,
-) -> AgentAction:
-    """Autonomous navigation: LLM decides next action toward goal from the a11y tree.
-
-    Falls back to a safe 'blocked' action on any failure so the run never crashes.
-    """
-    fallback = AgentAction(
-        step_label="navigation",
-        action="blocked",
-        reasoning="offline — no LLM key or call failed",
-    )
-    client = _client(settings.llm_model_step)
-    if client is None or not aria_excerpt:
-        return fallback
-
-    # Short-circuit: success URL already reached
-    if success_url and success_url.lstrip("/") in current_url:
-        return AgentAction(step_label="goal reached", action="done",
-                           reasoning=f"current URL {current_url} matches success_url")
-
-    hints_text = ", ".join(f"{k}={v}" for k, v in hints.items()) if hints else "none"
+    # Inject the page object and snapshot helper
+    ns = {"page": page}
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        human = HumanMessage(content=(
-            f"Goal: {goal}\n"
-            f"Current URL: {current_url}\n"
-            f"Success URL pattern: {success_url or '(none — infer from goal)'}\n"
-            f"Persona depends on labels/screen-reader semantics: {requires_labels}\n"
-            f"Available hint values to use in form fields: {hints_text}\n\n"
-            f"Accessibility tree:\n{aria_excerpt[:3000]}\n\n"
-            "What is the next action? "
-            "Remember: if labels are confusing, set confusion high and still act. "
-            "Only return 'blocked' if NO buttons, links, or inputs exist on the page. "
-            "Respond in JSON."
-        ))
-        ai = client.invoke(
-            [SystemMessage(content=_AGENT_SYSTEM), human],
-            config={"response_format": {"type": "json_object"}},
-        )
-        usage = getattr(ai, "usage_metadata", None) or {}
-        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
-        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
-        model_name = getattr(client, "model", getattr(client, "model_name", ""))
-        record_usage(model_name or settings.llm_model_step, prompt_tokens, completion_tokens)
-
-        payload = json.loads(_extract_text(ai.content))
-        action = AgentAction.model_validate(payload)
-
-        # Fix 2: deterministic CTA override — if LLM returned blocked but a primary
-        # action button exists in the tree, click it instead of giving up.
-        if action.action == "blocked":
-            cta = _find_cta(aria_excerpt)
-            if cta:
-                logger.info("agent_decide: overriding 'blocked' with CTA fallback '%s'", cta.name)
-                return cta
-
-        return action
+        exec(_PLAY_SNAPSHOT, _EXEC_GLOBALS, ns)
+        result = exec(code, _EXEC_GLOBALS, ns)
+        # If the code is an expression that returns a value, capture it
+        result_str = str(result) if result is not None else ""
+        # Wait for any navigation to settle
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        url = page.url
+        return f"OK. URL: {url}" + (f" → {result_str}" if result_str else "")
     except Exception as exc:
-        logger.warning("agent_decide failed (%s: %s); returning blocked", type(exc).__name__, exc)
-        return fallback
+        tb = traceback.format_exc().splitlines()
+        # Return the last 3 lines of traceback for conciseness
+        err = "\n".join(tb[-3:]) if len(tb) > 3 else "\n".join(tb)
+        return f"ERROR:\n{err}"
+
+
+def run_agent(
+    page,
+    *,
+    goal: str,
+    hints: dict | None = None,
+    success_url: str = "",
+    success_element: str = "",
+    aria: str = "",
+    requires_labels: bool = False,
+    behavior_profile: dict | None = None,
+    wcag: tuple = (),
+    grade: float | None = None,
+    word_count: int = 1,
+    rng=None,
+    artifact_dir: str | None = None,
+    current_url: str = "",
+    url_visit_counts: dict | None = None,
+    step_idx: int = 0,
+) -> dict:
+    """Multi-turn LLM agent with full Playwright `exec` access.
+
+    The LLM writes raw Playwright Python code executed against the live page.
+    One `exec` tool replaces all hardcoded action types, locator strategies,
+    and per-site patches. Returns accumulated steps/shots/status.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+    import pathlib as _pl
+
+    client = _client(settings.llm_model_step)
+    if client is None:
+        return {
+            "steps": [StepSignals(
+                step_idx=step_idx, step_key="offline", critical=False,
+                dwell_s=0, retries=0, dead_end=True, completed=False,
+                llm_confusion=0, reading_grade=grade,
+            )],
+            "shots": [], "step_idx": step_idx + 1,
+            "status": "blocked", "blocked_at": "offline",
+            "blocked_url": current_url,
+            "current_url": current_url, "url_visit_counts": url_visit_counts or {},
+        }
+
+    hints = hints or {}
+    url_counts = dict(url_visit_counts or {})
+    steps: list = []
+    shots: list = []
+    idx = step_idx
+    max_turns = 20
+    stuck_limit = 20
+
+    def _snap() -> str:
+        return f"Current URL: {page.url}\nAccessibility tree:\n{page.locator('body').aria_snapshot()}"
+
+    snapshot = _snap() if not aria else f"Current URL: {current_url}\nAccessibility tree:\n{aria}"
+    history: list = []
+
+    for turn in range(max_turns):
+        current_url = page.url
+        url_counts[current_url] = url_counts.get(current_url, 0) + 1
+        stuck = url_counts[current_url] >= stuck_limit
+        hints_text = ", ".join(f"{k}={v}" for k, v in hints.items()) if hints else "none"
+
+        turn_msgs = [SystemMessage(content=_MCP_SYSTEM)]
+        for h in history:
+            turn_msgs.append(HumanMessage(content=h["user"]))
+            if h.get("assistant"):
+                turn_msgs.append(SystemMessage(content=h["assistant"]))
+
+        user_msg = (
+            f"GOAL: {goal}\n"
+            f"Success URL pattern: {success_url or '(none)'}\n"
+            f"Success element: {success_element or '(none — look for matching text in a11y tree)'}\n"
+            f"Hint values: {hints_text}\n"
+            f"Persona depends on labels: {requires_labels}\n"
+            f"Stuck on this page for {url_counts[current_url]} visits (limit {stuck_limit}): {stuck}\n\n"
+            f"{snapshot}\n\n"
+            "Respond with {\"exec\": \"<code>\"} to run Playwright, or {\"done\": true} / {\"blocked\": true}."
+        )
+        turn_msgs.append(HumanMessage(content=user_msg))
+
+        try:
+            ai = client.invoke(
+                turn_msgs,
+                config={"response_format": {"type": "json_object"}},
+            )
+            usage = getattr(ai, "usage_metadata", None) or {}
+            prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+            completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+            model_name = getattr(client, "model", getattr(client, "model_name", ""))
+            record_usage(model_name or settings.llm_model_step, prompt_tokens, completion_tokens)
+
+            payload = json.loads(_extract_text(ai.content))
+        except Exception as exc:
+            logger.warning("run_agent: LLM call failed on turn %d: %s", turn, exc)
+            step = StepSignals(
+                step_idx=idx, step_key="llm_error", critical=False,
+                dwell_s=0, retries=0, dead_end=True, completed=False,
+                llm_confusion=0, reading_grade=grade,
+            )
+            steps.append(step)
+            return {
+                "steps": steps, "shots": shots, "step_idx": idx + 1,
+                "status": "blocked", "blocked_at": "llm_error",
+                "blocked_url": current_url,
+                "current_url": current_url, "url_visit_counts": url_counts,
+            }
+
+        step_label = payload.get("step_label", f"turn_{turn}")
+        confusion = float(payload.get("confusion", 0))
+
+        # --- done (dual gate: URL or element) -------------------------------
+        if payload.get("done"):
+            url_ok = not success_url or success_url.lstrip("/") in page.url
+            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
+            if not url_ok and not elem_ok:
+                gates = []
+                if success_url: gates.append(f"URL contains '{success_url}'")
+                if success_element: gates.append(f"a11y tree contains '{success_element[:80]}'")
+                result_msg = f"WARNING: said 'done' but neither gate passed: {' OR '.join(gates)}. Try again."
+                history.append({"user": user_msg, "assistant": json.dumps(payload)})
+                history.append({"user": result_msg, "assistant": None})
+                snapshot = f"Action rejected — still at: {_snap()}"
+                continue
+
+            step = StepSignals(
+                step_idx=idx, step_key=step_label, critical=False,
+                dwell_s=0, retries=0, dead_end=False, completed=True,
+                llm_confusion=confusion, reading_grade=grade,
+            )
+            steps.append(step)
+            return {
+                "steps": steps, "shots": shots, "step_idx": idx + 1,
+                "status": "completed", "blocked_at": None, "blocked_url": None,
+                "current_url": page.url, "url_visit_counts": url_counts,
+            }
+
+        # --- blocked --------------------------------------------------------
+        if payload.get("blocked") or stuck:
+            # Override: if goal is objectively reached, complete regardless.
+            url_ok = success_url and success_url.lstrip("/") in page.url
+            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
+            if url_ok or elem_ok:
+                step = StepSignals(
+                    step_idx=idx, step_key="goal reached", critical=False,
+                    dwell_s=0, retries=0, dead_end=False, completed=True,
+                    llm_confusion=confusion, reading_grade=grade,
+                )
+                steps.append(step)
+                return {
+                    "steps": steps, "shots": shots, "step_idx": idx + 1,
+                    "status": "completed", "blocked_at": None, "blocked_url": None,
+                    "current_url": page.url, "url_visit_counts": url_counts,
+                }
+            step = StepSignals(
+                step_idx=idx, step_key=step_label, critical=False,
+                dwell_s=0, retries=0, dead_end=True, completed=False,
+                llm_confusion=confusion, reading_grade=grade,
+            )
+            steps.append(step)
+            return {
+                "steps": steps, "shots": shots, "step_idx": idx + 1,
+                "status": "blocked", "blocked_at": step_label,
+                "blocked_url": page.url,
+                "current_url": page.url, "url_visit_counts": url_counts,
+            }
+
+        # --- exec -----------------------------------------------------------
+        code = payload.get("exec", "")
+        if not code:
+            # Empty response — LLM has nothing to do. Auto-check if at goal.
+            url_ok = success_url and success_url.lstrip("/") in page.url
+            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
+            if url_ok or elem_ok:
+                step = StepSignals(
+                    step_idx=idx, step_key="goal reached", critical=False,
+                    dwell_s=0, retries=0, dead_end=False, completed=True,
+                    llm_confusion=0, reading_grade=grade,
+                )
+                steps.append(step)
+                return {
+                    "steps": steps, "shots": shots, "step_idx": idx + 1,
+                    "status": "completed", "blocked_at": None, "blocked_url": None,
+                    "current_url": page.url, "url_visit_counts": url_counts,
+                }
+            # Not at goal and no action — blocked
+            step = StepSignals(
+                step_idx=idx, step_key="no_action", critical=False,
+                dwell_s=0, retries=0, dead_end=True, completed=False,
+                llm_confusion=0, reading_grade=grade,
+            )
+            steps.append(step)
+            return {
+                "steps": steps, "shots": shots, "step_idx": idx + 1,
+                "status": "blocked", "blocked_at": "no_action",
+                "blocked_url": page.url,
+                "current_url": page.url, "url_visit_counts": url_counts,
+            }
+        else:
+            result_msg = _play_exec(page, code)
+
+        # Screenshot
+        shot = None
+        if artifact_dir:
+            d = _pl.Path(artifact_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            shot = str(d / f"step_{idx}.png")
+            try:
+                page.screenshot(path=shot)
+            except Exception:
+                pass
+
+        dead_end = result_msg.startswith("ERROR")
+        step = StepSignals(
+            step_idx=idx, step_key=step_label, critical=False,
+            dwell_s=0, retries=0, dead_end=dead_end, completed=not dead_end,
+            llm_confusion=confusion, reading_grade=grade,
+            wcag=wcag if idx == 0 else (),
+        )
+        steps.append(step)
+        if shot:
+            shots.append(shot)
+        idx += 1
+
+        # Auto-detect success: if the exec brought us to the goal, complete immediately.
+        if not dead_end:
+            url_ok = success_url and success_url.lstrip("/") in page.url
+            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
+            if url_ok or elem_ok:
+                return {
+                    "steps": steps, "shots": shots, "step_idx": idx,
+                    "status": "completed", "blocked_at": None, "blocked_url": None,
+                    "current_url": page.url, "url_visit_counts": url_counts,
+                }
+
+        # Next turn's snapshot
+        snapshot = f"Result: {result_msg}\n\n{_snap()}"
+
+        history.append({"user": user_msg, "assistant": json.dumps(payload)})
+        history.append({"user": result_msg, "assistant": None})
+
+    # Max turns exhausted
+    step = StepSignals(
+        step_idx=idx, step_key="max_turns", critical=False,
+        dwell_s=0, retries=0, dead_end=True, completed=False,
+        llm_confusion=0, reading_grade=grade,
+    )
+    steps.append(step)
+    return {
+        "steps": steps, "shots": shots, "step_idx": idx + 1,
+        "status": "blocked", "blocked_at": "max_turns",
+        "blocked_url": page.url,
+        "current_url": page.url, "url_visit_counts": url_counts,
+    }
 
 
 # --- synthesize (once-per-run reasoning) ------------------------------------
