@@ -358,23 +358,57 @@ _VALUE_MAP: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-def _smart_value(role: str, name: str, aria: str = "") -> str:
+# Caller-supplied known values ("hints") matched to a field by accessible name. A hint
+# is authoritative test data the run already knows (a fixed staging OTP, a specific phone),
+# adapted from main's `hints` design. Synonyms let "phone" match a "Mobile Number" field.
+_HINT_SYNS: dict[str, tuple[str, ...]] = {
+    "phone": ("phone", "mobile", "tel", "contact number", "contact no", "hp", "telefon"),
+    "email": ("email", "e-mail", "emel"),
+    "ic": ("ic", "mykad", "nric", "identity", "kad pengenalan", "no. mykad"),
+    "name": ("name", "nama"),
+    "password": ("password", "passcode", "kata laluan"),
+}
+
+
+def _hint_value(name_lower: str, hints: dict | None) -> str:
+    """A hint whose key (or its synonyms) matches the field name, else ''. OTP is excluded —
+    it needs per-digit splitting and is sourced inside `_smart_value._otp` instead."""
+    if not hints:
+        return ""
+    for hk, hv in hints.items():
+        hkl = str(hk).lower()
+        if hkl in ("otp", "code"):
+            continue
+        if hkl and hkl in name_lower:
+            return str(hv)
+        if any(s in name_lower for s in _HINT_SYNS.get(hkl, ())):
+            return str(hv)
+    return ""
+
+
+def _smart_value(role: str, name: str, aria: str = "", hints: dict | None = None) -> str:
     """Realistic, type-appropriate test data — what a human enters so validation passes.
 
     Generic across projects: keys off the field's accessible name (and the on-screen OTP
-    hint), not any one app's wording. Falls back to a benign alphanumeric string.
+    hint), not any one app's wording. A caller `hints` dict (e.g. {"otp": "123456"}) is
+    authoritative when it matches the field. Falls back to a benign alphanumeric string.
     """
     n = (name or "").lower()
+    hints = hints or {}
 
     def _otp() -> str:
-        # Code = on-screen hint if any, else the standard test code 1234. For a per-digit
-        # box ("Digit 3") return JUST that digit — a 1-char field keeps only its first char,
-        # so dumping the whole code into every box yields 1111 and fails (the real-app bug).
-        hint_m = _CODE_HINT.search(aria or "")
-        code = hint_m.group(1) if hint_m else "1234"
-        dm = re.search(r"(\d+)", n)
-        if dm:
-            i = int(dm.group(1)) - 1
+        # Code source: an explicit hint, else an on-screen hint, else the test code 1234.
+        code = str(hints.get("otp") or hints.get("code") or "")
+        if not code:
+            hint_m = _CODE_HINT.search(aria or "")
+            code = hint_m.group(1) if hint_m else "1234"
+        # Per-digit box ("Digit 3") returns JUST that digit (a 1-char field keeps only its
+        # first char, so the whole code in every box yields 1111). The index FOLLOWS a box
+        # keyword — "6-digit OTP" is a SINGLE field (number precedes "digit") and must not
+        # be split, so only match a number that comes after digit/box/char/position.
+        bm = re.search(r"(?:digit|box|char(?:acter)?|position|pin)\s*[#:]?\s*(\d+)", n)
+        if bm:
+            i = int(bm.group(1)) - 1
             if 0 <= i < len(code):
                 return code[i]
         return code
@@ -382,6 +416,10 @@ def _smart_value(role: str, name: str, aria: str = "") -> str:
     # 1) unambiguous OTP/verification fields.
     if any(k in n for k in ("otp", "verification code", "verify code", "one-time", "digit")):
         return _otp()
+    # 1.5) an explicit hint matching this field wins over synthesized data.
+    hv = _hint_value(n, hints)
+    if hv:
+        return hv
     # 2) specific named fields (CVV/coupon/etc. own their "...code" before the bare fallback).
     for keys, val in _VALUE_MAP:
         if any(k in n for k in keys):
@@ -469,7 +507,7 @@ def _heuristic_explore(aria: str, history: list[dict], rng, *,
 
 
 def plan_action(aria: str, goal: str, history: list[dict], rng, *,
-                current_screen_key: str = "") -> AgentAction:
+                current_screen_key: str = "", hints: dict | None = None) -> AgentAction:
     """The `plan` node's work: choose the next action from the live a11y tree (§8).
 
     Offline (no key) or on any failure, returns the deterministic heuristic explorer so a
@@ -498,8 +536,10 @@ def plan_action(aria: str, goal: str, history: list[dict], rng, *,
         # Distinct screens already visited — lets the agent gauge overall progress in PASS 2.
         screens_visited = len({h.get("screen_key", "") for h in history if h.get("screen_key")})
 
+        hints_text = ", ".join(f"{k}={v}" for k, v in (hints or {}).items()) or "(none)"
         human = HumanMessage(content=(
             f"GOAL: {goal}\n"
+            f"Known values to use when a field matches (USE THESE EXACTLY): {hints_text}\n"
             f"Distinct screens visited so far: {screens_visited}\n"
             f"UNTESTED controls on THIS screen (test these before leaving): {untested_str}\n"
             f"Already-tested controls on THIS screen: {tested_str}\n"

@@ -40,6 +40,9 @@ class NavConfig:
     flow: list[FlowStep] = field(default_factory=list)  # scripted steps; empty => autonomous (goal-driven)
     goal: str = ""                       # high-level task when flow is empty → autonomous exploration
     max_steps: int = 20                  # safety cap on the autonomous loop
+    hints: dict = field(default_factory=dict)  # known values the agent must use, e.g. {"otp": "123456"}
+    success_url: str = ""                # URL suffix that means the goal is reached, e.g. "/rewards"
+    success_element: str = ""            # a11y text that means the goal is reached, e.g. "you're in"
     viewport: str = "iPhone 13"          # Playwright device descriptor (FR-1.1, mobile emulation)
     behavior_profile: dict = field(default_factory=dict)  # §11
     requires_labels: bool = False        # persona depends on labels/SR semantics (oku_visual)

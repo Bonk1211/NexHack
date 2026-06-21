@@ -44,6 +44,9 @@ class PersonaInput(TypedDict, total=False):
     flow: list[FlowStep]             # scripted steps; empty => autonomous (goal-driven)
     goal: str                        # high-level task for autonomous exploration
     max_steps: int                   # safety cap on the autonomous loop
+    hints: dict                      # known values the agent must use, e.g. {"otp": "123456"}
+    success_url: str                 # URL suffix meaning the goal is reached
+    success_element: str             # a11y text meaning the goal is reached
     viewport: str
     seed: int                        # per-persona seed+i — determinism under Send concurrency
     artifact_dir: Optional[str]
@@ -123,6 +126,9 @@ class RunState(TypedDict, total=False):
     flow: list[FlowStep]             # scripted steps; empty => autonomous (goal-driven)
     goal: str                        # high-level task for autonomous exploration
     max_steps: int                   # safety cap on the autonomous loop
+    hints: dict                      # known values the agent must use, e.g. {"otp": "123456"}
+    success_url: str                 # URL suffix meaning the goal is reached
+    success_element: str             # a11y text meaning the goal is reached
     seed: int
     artifact_root: Optional[str]
     run_at: str                      # ISO-8601, set by init

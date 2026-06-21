@@ -205,3 +205,36 @@ def test_autonomous_walks_full_wizard_handling_every_control_type():
     assert sum(1 for k in keys if k.startswith("fill")) >= 5, keys
     # Did not get stuck: terminated cleanly (not via the safety cap).
     assert len(j.steps) < 60, len(j.steps)
+
+
+# --- hints + success criteria (adapted from main) ---------------------------
+
+def test_otp_hint_sources_the_code():
+    # A single OTP field uses the hint code verbatim; a per-digit box returns its digit.
+    assert _smart_value("textbox", "Enter OTP", hints={"otp": "987654"}) == "987654"
+    assert _smart_value("textbox", "Digit 3", aria="", hints={"otp": "987654"}) == "7"
+
+
+def test_six_digit_otp_field_not_split():
+    # "6-digit OTP" is ONE field — the '6' describes length, it must NOT be read as an index.
+    assert _smart_value("textbox", "Enter 6-digit OTP", hints={"otp": "123456"}) == "123456"
+    # And without a hint it falls back to the default test code, still whole.
+    assert _smart_value("textbox", "Enter 6-digit OTP") == "1234"
+
+
+def test_hint_matches_field_by_synonym():
+    from app.agents.llm import _hint_value
+    assert _hint_value("mobile number", {"phone": "0123456789"}) == "0123456789"
+    assert _hint_value("e-mail address", {"email": "a@b.com"}) == "a@b.com"
+    assert _hint_value("full name", {"otp": "1234"}) == ""        # OTP excluded from generic path
+
+
+def test_success_element_terminates_walk_early():
+    """A success_element matching an early screen ends the walk there — no over-exploration."""
+    cfg = NavConfig(WIZARD, goal="reach verification", behavior_profile=BP, seed=1,
+                    max_steps=60, success_element="verify your number")
+    j = run_journey(cfg)
+    keys = [s.step_key for s in j.steps]
+    assert j.steps, "should record at least the phone-screen steps"
+    assert not any("Digit" in k for k in keys), keys          # stopped before testing OTP boxes
+    assert len(j.steps) <= 4, keys                            # did not walk the whole wizard

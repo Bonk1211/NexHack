@@ -109,15 +109,42 @@ def _resolve_goal(app_name: str) -> str:
         return _DEFAULT_GOAL
 
 
-def _resolve_journey(app_name: str) -> tuple[list[FlowStep], str]:
+def _resolve_extras(app_name: str) -> tuple[dict, str, str]:
+    """Per-app hints + success criteria (best-effort). Tolerates the columns not existing
+    yet — returns empties so behavior is unchanged until an app defines them."""
+    try:
+        from app.db import get_client
+        rows = (get_client().table("apps")
+                .select("hints,success_url,success_element").eq("name", app_name)
+                .limit(1).execute().data) or []
+        if not rows:
+            return {}, "", ""
+        r = rows[0]
+        h = r.get("hints") or {}
+        if isinstance(h, str):
+            try:
+                h = json.loads(h)
+            except Exception:
+                h = {}
+        return (h if isinstance(h, dict) else {},
+                (r.get("success_url") or "").strip(), (r.get("success_element") or "").strip())
+    except Exception:
+        logger.warning("_resolve_extras: no hints/success columns for '%s'", app_name)
+        return {}, "", ""
+
+
+def _resolve_journey(app_name: str) -> tuple[list[FlowStep], str, dict, str, str]:
     """All apps explore autonomously.
 
     Scripted flow_steps in the DB are intentionally ignored here: they were only
     ever partial lists (fill steps with no navigation clicks between pages), so
     replaying them kept the persona on the first page. The autonomous agent drives
     the real UI and navigates naturally across pages toward the app's goal.
+
+    Returns (flow, goal, hints, success_url, success_element).
     """
-    return [], _resolve_goal(app_name)
+    hints, success_url, success_element = _resolve_extras(app_name)
+    return [], _resolve_goal(app_name), hints, success_url, success_element
 
 
 class StartRunRequest(BaseModel):
@@ -309,7 +336,7 @@ def start_run(req: StartRunRequest) -> dict:
     # existing id to RESUME an interrupted run; re-POSTing a completed id is idempotent
     # (returns the existing pack), neither re-runs nor duplicates personas.
     run_id = req.run_id or str(uuid.uuid4())
-    flow, goal = _resolve_journey(req.app_name)
+    flow, goal, hints, success_url, success_element = _resolve_journey(req.app_name)
     with track_usage() as tracker:
         pack = orchestrator.run_assessment(
             app_name=req.app_name,
@@ -317,6 +344,9 @@ def start_run(req: StartRunRequest) -> dict:
             persona_names=req.persona_names,
             flow=flow,
             goal=goal,
+            hints=hints,
+            success_url=success_url,
+            success_element=success_element,
             seed=req.seed,
             run_id=run_id,
             artifact_root=str(_ARTIFACTS / run_id),   # FR-1.3: capture a screenshot every step
@@ -406,7 +436,7 @@ def stream_run(
                 set_tracker(tracker)
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
-                flow, goal = _resolve_journey(app_name)
+                flow, goal, hints, success_url, success_element = _resolve_journey(app_name)
                 payload = {
                     "persona": name,
                     "persona_idx": i,
@@ -416,6 +446,9 @@ def stream_run(
                     "target_url": target_url,
                     "flow": flow,
                     "goal": goal,                     # autonomous exploration when flow is empty
+                    "hints": hints,                   # known values the agent must use (e.g. OTP)
+                    "success_url": success_url,       # clean goal-reached exit
+                    "success_element": success_element,
                     "max_steps": 50,                  # safety cap on the autonomous loop
                     "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
                     "seed": seed + i,                 # §16 deterministic per persona

@@ -41,6 +41,7 @@ from app.agents.llm import (
     _SELECT_ROLES,
     _action_signature,
     _example_from_placeholder,
+    _hint_value,
     _screen_skeleton,
     _smart_value,
     plan_action,
@@ -60,6 +61,21 @@ from app.llm_usage import current_tracker, set_tracker
 
 def _bp(state: PersonaState) -> dict:
     return state.get("behavior_profile", {})
+
+
+def _goal_reached(state: PersonaState) -> bool:
+    """Explicit success signal (adapted from main): the walk is DONE the moment the URL
+    ends with `success_url` or the a11y tree contains `success_element` text. Lets a run
+    stop cleanly on 'You're in!' / '/rewards' instead of exploring until the step cap."""
+    su = (state.get("success_url") or "").strip().rstrip("/")
+    if su:
+        try:
+            if state["page"].url.rstrip("/").endswith(su):
+                return True
+        except Exception:
+            pass
+    se = (state.get("success_element") or "").strip().lower()
+    return bool(se and se in (state.get("aria", "") or "").lower())
 
 
 # Generated test files for upload steps, one per kind, made once and reused.
@@ -235,6 +251,11 @@ def plan(state: PersonaState) -> dict:
                 "current_labeled": labeled}
 
     # AUTONOMOUS
+    # Explicit success signal reached => stop cleanly, no further exploration.
+    if _goal_reached(state):
+        return {"current_action": {"action": "done", "key": "done"}, "last_confusion": 0.0,
+                "last_fallback": None, "last_reason": "goal reached", "current_labeled": True}
+
     # An unfilled file input on this screen is handled deterministically (the planner can't
     # see hidden inputs) and BEFORE the CTA, which is usually gated on the upload.
     pend = _pending_upload(state["page"])
@@ -258,7 +279,8 @@ def plan(state: PersonaState) -> dict:
 
     a = plan_action(state.get("aria", ""), state.get("goal", ""),
                     state.get("action_history", []), state["rng"],
-                    current_screen_key=state.get("current_screen_key", ""))
+                    current_screen_key=state.get("current_screen_key", ""),
+                    hints=state.get("hints", {}))
     labeled = _role_has_name(state.get("aria", ""), a.role) if a.role else True
     action = a.model_dump()
     action["critical"] = True  # autonomously-discovered steps are treated as critical (§12)
@@ -516,8 +538,12 @@ def act(state: PersonaState) -> dict:
                     ph = tgt.get_attribute("placeholder", timeout=1000) or ""
                 except Exception:
                     ph = ""
-                value = (_example_from_placeholder(ph) or act_chosen.get("value", "")
-                         or _smart_value(role, name, state.get("aria", "")))
+                # A caller hint that matches this field wins outright (it's the known-good
+                # value); else the placeholder's concrete format; else planner/synthesized.
+                hints = state.get("hints", {})
+                value = (_hint_value((name or "").lower(), hints)
+                         or _example_from_placeholder(ph) or act_chosen.get("value", "")
+                         or _smart_value(role, name, state.get("aria", ""), hints))
                 # Type real keystrokes, NOT .fill(). React controlled inputs (Next.js apps
                 # like BrewPoints) only commit to component state on per-key input events;
                 # .fill() sets the DOM value + one synthetic event that React may drop, so
@@ -760,6 +786,9 @@ def run_journey(cfg: NavConfig) -> JourneyResult:
         "flow": cfg.flow,
         "goal": cfg.goal,
         "max_steps": cfg.max_steps,
+        "hints": cfg.hints,
+        "success_url": cfg.success_url,
+        "success_element": cfg.success_element,
         "viewport": cfg.viewport,
         "seed": cfg.seed,
         "artifact_dir": cfg.artifact_dir,
