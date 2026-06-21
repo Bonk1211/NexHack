@@ -233,7 +233,7 @@ def plan(state: PersonaState) -> dict:
     if flow:
         if state["step_count"] >= len(flow):
             return {"current_action": {"action": "done", "key": "done"}, "last_confusion": 0.0,
-                    "current_labeled": True}
+                    "current_labeled": True, "current_say": ""}
         fs: FlowStep = flow[state["step_count"]]
         labeled = _role_has_name(state.get("aria", ""), fs.role) if fs.role else True
         j = vision_judge(
@@ -248,13 +248,14 @@ def plan(state: PersonaState) -> dict:
                   "key": fs.key, "critical": fs.critical}
         return {"current_action": action, "last_confusion": j.confusion,
                 "last_fallback": j.fallback_target, "last_reason": j.reason,
-                "current_labeled": labeled}
+                "current_labeled": labeled, "current_say": ""}
 
     # AUTONOMOUS
     # Explicit success signal reached => stop cleanly, no further exploration.
     if _goal_reached(state):
         return {"current_action": {"action": "done", "key": "done"}, "last_confusion": 0.0,
-                "last_fallback": None, "last_reason": "goal reached", "current_labeled": True}
+                "last_fallback": None, "last_reason": "goal reached", "current_labeled": True,
+                "current_say": "Looks like I made it — I'm all done."}
 
     # An unfilled file input on this screen is handled deterministically (the planner can't
     # see hidden inputs) and BEFORE the CTA, which is usually gated on the upload.
@@ -265,7 +266,8 @@ def plan(state: PersonaState) -> dict:
                   "value": pend.get("accept", ""), "key": f"upload:{label}",
                   "critical": True, "reason": "upload required document"}
         return {"current_action": action, "last_confusion": 0.0,
-                "last_fallback": None, "last_reason": "upload", "current_labeled": True}
+                "last_fallback": None, "last_reason": "upload", "current_labeled": True,
+                "current_say": f"I need to upload my {label}."}
 
     # An unset <select> is chosen deterministically too — the LLM tends to skip dropdowns.
     psel = _pending_select(state["page"])
@@ -275,17 +277,20 @@ def plan(state: PersonaState) -> dict:
                   "value": psel.get("value", ""), "key": f"fill:{name or 'dropdown'}",
                   "critical": True, "reason": "choose dropdown option"}
         return {"current_action": action, "last_confusion": 0.0,
-                "last_fallback": None, "last_reason": "select", "current_labeled": True}
+                "last_fallback": None, "last_reason": "select", "current_labeled": True,
+                "current_say": f"Let me pick an option for {name or 'this dropdown'}."}
 
     a = plan_action(state.get("aria", ""), state.get("goal", ""),
                     state.get("action_history", []), state["rng"],
                     current_screen_key=state.get("current_screen_key", ""),
-                    hints=state.get("hints", {}))
+                    hints=state.get("hints", {}),
+                    persona_voice=state.get("persona_voice", ""))
     labeled = _role_has_name(state.get("aria", ""), a.role) if a.role else True
     action = a.model_dump()
     action["critical"] = True  # autonomously-discovered steps are treated as critical (§12)
     return {"current_action": action, "last_confusion": a.confusion,
-            "last_fallback": None, "last_reason": a.reason, "current_labeled": labeled}
+            "last_fallback": None, "last_reason": a.reason, "current_labeled": labeled,
+            "current_say": a.say}
 
 
 def decide(state: PersonaState) -> dict:

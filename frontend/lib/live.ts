@@ -155,11 +155,12 @@ export type StreamEvent =
       type: "node";
       scope: "persona";
       persona: string;
-      node: "observe" | "comprehend" | "decide";
+      node: "observe" | "comprehend" | "decide" | "plan";
       step_idx?: number;
       screenshot_url?: string | null;
       confusion?: number;
       dwell_s?: number;
+      monologue?: string; // first-person line the persona "says" on a plan step
       output?: NodeOutput;
     }
   | { type: "persona_start"; persona: string; idx: number; label: string }

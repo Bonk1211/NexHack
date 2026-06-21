@@ -66,6 +66,7 @@ class AgentAction(BaseModel):
     key: str = Field(default="", description="stable step label, e.g. 'click:Submit'")
     confusion: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = Field(default="")
+    say: str = Field(default="", description="ONE short first-person sentence in the persona's voice — what they're thinking/feeling as they take this action. No JSON, no meta.")
 
 
 # --- Client factory ---------------------------------------------------------
@@ -213,7 +214,7 @@ _PLAN_SYSTEM = (
     "Given the current a11y tree and actions already taken, choose the SINGLE next action. "
     "Respond ONLY with a JSON object of exactly this shape:\n"
     '{"action":"click|fill|navigate_back|done|blocked","role":"","name":"","nth":0,'
-    '"value":"","key":"","confusion":0.0,"reason":""}.\n'
+    '"value":"","key":"","confusion":0.0,"reason":"","say":""}.\n'
     "  'fill'  — for a text input (role textbox/searchbox/spinbutton) set value to realistic, "
     "TYPE-APPROPRIATE data: a phone field gets digits, an email field gets name@example.com, "
     "a name field gets a full name, an OTP/code field gets the code shown in any on-screen hint. "
@@ -229,7 +230,11 @@ _PLAN_SYSTEM = (
     "If you clicked the primary CTA but the screen did not change, a required field is "
     "invalid or empty — read the error text and fix that field before retrying.\n"
     "confusion 0.0 = obvious, 1.0 = genuinely unclear. "
-    "Set key like 'click:Continue' or 'fill:Mobile Number' (action:Name)."
+    "Set key like 'click:Continue' or 'fill:Mobile Number' (action:Name).\n"
+    "Set 'say' to ONE short first-person sentence in THIS persona's voice describing what "
+    "you are thinking or feeling as you take this action (doubt, relief, confusion, impatience). "
+    "Stay fully in character; never mention being an AI, a test, a persona, a screen-reader, "
+    "or an accessibility tree — just a real person using the app."
 )
 
 # Parse an aria_snapshot's "- role \"name\"" lines, in stable tree order.
@@ -453,6 +458,19 @@ def _screen_control_status(aria: str, history: list[dict], current_screen_key: s
     return untested, tested
 
 
+def _offline_say(verb: str, name: str) -> str:
+    """A plain first-person line for the offline path (no key) so the monologue is never
+    empty. Generic on purpose — persona flavour comes from the LLM path; this just keeps
+    the live view human-readable in tests/demos."""
+    if verb == "fill":
+        return f"Let me type my {name or 'details'} here."
+    if verb == "navigate_back":
+        return "Nothing left here — let me go back."
+    if verb == "done":
+        return "Looks like I'm all done."
+    return f"I'll tap {name}." if name else "Let me try this."
+
+
 def _heuristic_explore(aria: str, history: list[dict], rng, *,
                        current_screen_key: str = "") -> AgentAction:
     """Deterministic offline planner (§16/§22) that mirrors a careful human tester:
@@ -487,7 +505,8 @@ def _heuristic_explore(aria: str, history: list[dict], rng, *,
                 continue
             value = _smart_value(role, name, aria) if (verb == "fill" and role in _FILL_ROLES) else ""
             return AgentAction(action=verb, role=role, name=name, nth=nth, value=value,
-                               key=f"{verb}:{name or role}#{nth}", reason=reason)
+                               key=f"{verb}:{name or role}#{nth}", reason=reason,
+                               say=_offline_say(verb, name))
         return None
 
     chosen = (
@@ -502,12 +521,15 @@ def _heuristic_explore(aria: str, history: list[dict], rng, *,
     nav_sig = _action_signature({"action": "navigate_back"})
     if nav_sig not in done and history:
         return AgentAction(action="navigate_back", key="navigate_back",
-                           reason="offline: screen exhausted, exploring back")
-    return AgentAction(action="done", key="done", reason="offline: all reachable screens exhausted")
+                           reason="offline: screen exhausted, exploring back",
+                           say=_offline_say("navigate_back", ""))
+    return AgentAction(action="done", key="done", reason="offline: all reachable screens exhausted",
+                       say=_offline_say("done", ""))
 
 
 def plan_action(aria: str, goal: str, history: list[dict], rng, *,
-                current_screen_key: str = "", hints: dict | None = None) -> AgentAction:
+                current_screen_key: str = "", hints: dict | None = None,
+                persona_voice: str = "") -> AgentAction:
     """The `plan` node's work: choose the next action from the live a11y tree (§8).
 
     Offline (no key) or on any failure, returns the deterministic heuristic explorer so a
@@ -537,7 +559,9 @@ def plan_action(aria: str, goal: str, history: list[dict], rng, *,
         screens_visited = len({h.get("screen_key", "") for h in history if h.get("screen_key")})
 
         hints_text = ", ".join(f"{k}={v}" for k, v in (hints or {}).items()) or "(none)"
+        persona_line = f"PERSONA (speak in this voice for 'say'): {persona_voice}\n" if persona_voice else ""
         human = HumanMessage(content=(
+            persona_line +
             f"GOAL: {goal}\n"
             f"Known values to use when a field matches (USE THESE EXACTLY): {hints_text}\n"
             f"Distinct screens visited so far: {screens_visited}\n"

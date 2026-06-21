@@ -47,6 +47,7 @@ class PersonaInput(TypedDict, total=False):
     hints: dict                      # known values the agent must use, e.g. {"otp": "123456"}
     success_url: str                 # URL suffix meaning the goal is reached
     success_element: str             # a11y text meaning the goal is reached
+    persona_voice: str               # compact voice context — makes the planner's `say` in-character
     viewport: str
     seed: int                        # per-persona seed+i — determinism under Send concurrency
     artifact_dir: Optional[str]
@@ -96,6 +97,7 @@ class PersonaState(PersonaInput, total=False):
     last_confusion: float
     last_fallback: Optional[str]
     last_reason: str
+    current_say: str                     # the persona's first-person monologue for this step
 
     # Control-flow status read by route_next ("running"|"blocked"|"completed")
     status: str

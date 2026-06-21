@@ -53,6 +53,7 @@ interface NodeCardItem {
   status?: string; // step status (red/amber/green) where applicable
   output?: Record<string, unknown>;
   screenshot_url?: string | null;
+  monologue?: string; // persona's first-person line for this step (plan node)
 }
 export interface LiveState {
   runNodes: string[]; // run-scope nodes seen, in order (for the pipeline bar)
@@ -79,6 +80,7 @@ export function reduce(s: LiveState, e: StreamEvent): LiveState {
     return push(s, {
       scope: "persona", node: e.node, persona: e.persona,
       output: e.output, screenshot_url: e.screenshot_url ?? undefined,
+      monologue: e.monologue,
     });
   }
   if (e.type === "step") {
@@ -491,6 +493,31 @@ export function LiveView({
   );
 }
 
+// Reveals text char-by-char so a monologue reads like someone thinking aloud. Only the
+// LATEST bubble animates; earlier ones render in full (animate=false) so history doesn't
+// re-type on every render.
+function Typewriter({ text, animate, speedMs = 28 }: { text: string; animate: boolean; speedMs?: number }) {
+  const [n, setN] = useState(animate ? 0 : text.length);
+  useEffect(() => {
+    if (!animate) {
+      setN(text.length);
+      return;
+    }
+    setN(0);
+    const id = setInterval(() => {
+      setN((c) => {
+        if (c >= text.length) {
+          clearInterval(id);
+          return c;
+        }
+        return c + 1;
+      });
+    }, speedMs);
+    return () => clearInterval(id);
+  }, [text, animate, speedMs]);
+  return <>{text.slice(0, n)}</>;
+}
+
 // One persona's live lane: its CDP screencast frame above its own node feed. Each
 // column owns its scroll ref so feeds autoscroll independently.
 function PersonaColumn({
@@ -505,9 +532,14 @@ function PersonaColumn({
   personaInfo?: { name: string; figurineUrl?: string };
 }) {
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+
+  // First-person monologue bubbles — the primary, human-readable feed.
+  const bubbles = items.filter((it) => it.monologue);
+  // Autoscroll the active feed whenever new content arrives.
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [items.length]);
+  }, [items.length, showDetails]);
 
   const displayName = personaInfo?.name ?? persona;
 
@@ -550,11 +582,32 @@ function PersonaColumn({
         <div className="mx-auto mt-2 h-[4px] w-[36px] rounded-full bg-gray-300" />
       </div>
 
-      <div ref={feedRef} className="mt-3 max-h-[280px] space-y-2 overflow-y-auto pr-1">
-        {items.length === 0 ? (
-          <p className="text-[12px] text-tertiary">waiting for nodes…</p>
+      {/* Toggle: monologue (default, feels like a person) vs raw node cards (debug) */}
+      <div className="mt-3 flex justify-end">
+        <button
+          type="button"
+          onClick={() => setShowDetails((v) => !v)}
+          className="text-[11px] text-tertiary hover:text-secondary"
+        >
+          {showDetails ? "Hide node details" : "Show node details"}
+        </button>
+      </div>
+
+      <div ref={feedRef} className="mt-2 max-h-[280px] space-y-2 overflow-y-auto pr-1">
+        {showDetails ? (
+          items.length === 0 ? (
+            <p className="text-[12px] text-tertiary">waiting for nodes…</p>
+          ) : (
+            items.map((item) => <NodeOutputCard key={item.id} item={item} />)
+          )
+        ) : bubbles.length === 0 ? (
+          <p className="text-[12px] text-tertiary">waiting…</p>
         ) : (
-          items.map((item) => <NodeOutputCard key={item.id} item={item} />)
+          bubbles.map((b, i) => (
+            <div key={b.id} className="rounded-2xl rounded-tl-sm bg-field px-3 py-2 text-[13px] leading-relaxed text-primary">
+              <Typewriter text={b.monologue as string} animate={i === bubbles.length - 1} />
+            </div>
+          ))
         )}
       </div>
     </div>

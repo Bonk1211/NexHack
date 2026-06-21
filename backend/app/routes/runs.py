@@ -437,6 +437,14 @@ def stream_run(
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
                 flow, goal, hints, success_url, success_element = _resolve_journey(app_name)
+                # Compact voice context so the planner's first-person `say` is in character.
+                # cfg from DB rows may omit behavior_prompt/patience/tech_savviness — .get keeps it safe.
+                persona_voice = (
+                    f"{cfg.get('name', name)}; tech_savviness={cfg.get('tech_savviness', '?')}; "
+                    f"patience={cfg.get('patience', '?')}; language={cfg.get('language', 'en')}; "
+                    f"disabilities={', '.join(cfg.get('disabilities', [])) or 'none'}. "
+                    f"{cfg.get('behavior_prompt', '')}"
+                ).strip()
                 payload = {
                     "persona": name,
                     "persona_idx": i,
@@ -449,6 +457,8 @@ def stream_run(
                     "hints": hints,                   # known values the agent must use (e.g. OTP)
                     "success_url": success_url,       # clean goal-reached exit
                     "success_element": success_element,
+                    "persona_voice": persona_voice,   # in-character first-person monologue
+
                     "max_steps": 50,                  # safety cap on the autonomous loop
                     "viewport": "iPhone 13",          # FR-1.1 mobile device descriptor
                     "seed": seed + i,                 # §16 deterministic per persona
@@ -474,6 +484,7 @@ def stream_run(
                         act = data.get("current_action") or {}
                         q.put({"type": "node", "scope": "persona", "persona": name,
                                "node": "plan", "confusion": data.get("last_confusion"),
+                               "monologue": data.get("current_say") or "",
                                "output": {"action": act.get("action"),
                                           "target": act.get("name") or act.get("role"),
                                           "confusion": data.get("last_confusion"),
