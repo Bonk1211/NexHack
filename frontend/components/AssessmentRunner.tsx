@@ -610,24 +610,26 @@ export function Results({ pack, runId, usage }: { pack: Pack; runId: string | nu
       {/* Friction matrix (the hero diff) */}
       <div>
         <h2 className="section-label mb-2">Friction matrix</h2>
-        <div className="overflow-x-auto rounded-card bg-card p-3">
+        {/* Steps are ROWS (a run can have many — vertical scroll) and personas are COLUMNS
+            (few — they fit), so the matrix never needs horizontal scroll. */}
+        <div className="rounded-card bg-card p-3">
           <table className="w-full text-[13px]">
             <thead>
               <tr className="text-tertiary">
-                <th className="p-2 text-left font-medium">persona</th>
-                {pack.matrix.steps.map((s) => (
-                  <th key={s} className="p-2 text-left font-medium">{s}</th>
+                <th className="p-2 text-left font-medium">step</th>
+                {Object.keys(pack.matrix.rows).map((persona) => (
+                  <th key={persona} className="p-2 text-left font-medium">{persona}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {Object.entries(pack.matrix.rows).map(([persona, cells]) => (
-                <tr key={persona} className="border-t border-hairline">
-                  <td className="p-2 text-primary">{persona}</td>
-                  {pack.matrix.steps.map((s) => {
+              {pack.matrix.steps.map((s) => (
+                <tr key={s} className="border-t border-hairline">
+                  <td className="max-w-[240px] break-words p-2 text-primary">{s}</td>
+                  {Object.values(pack.matrix.rows).map((cells, ci) => {
                     const c = cells[s];
                     return (
-                      <td key={s} className="p-2">
+                      <td key={ci} className="p-2">
                         <span className={`inline-flex items-center gap-1.5 ${STATUS_COLOR[c?.status ?? "na"]}`}>
                           <span className={`h-2 w-2 rounded-full ${STATUS_DOT[c?.status ?? "na"]}`} />
                           {c?.status ?? "na"}

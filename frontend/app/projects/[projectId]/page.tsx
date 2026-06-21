@@ -182,7 +182,7 @@ export default function ProjectDetailPage() {
 
       <div className="border-b border-hairline px-10">
         <div className="flex gap-6">
-          {(["overview", "dashboard", "personas", "runs"] as Tab[]).map((t) => (
+          {(["overview", "personas", "runs"] as Tab[]).map((t) => (
             <button
               key={t}
               type="button"
