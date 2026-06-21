@@ -23,7 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app import orchestrator, repository
-from app.agents.llm import synthesize
+from app.agents.llm import proposal_insights, synthesize
 from app.agents.persona_graph import stream_persona
 from app.agents.run_graph import DEFAULT_FLOW, _requires_labels
 from app.agents.navigator import FlowStep
@@ -553,6 +553,10 @@ def stream_run(
                 for p in pack["personas"]
             }
             pack["synthesis"] = synthesize(pack).model_dump()
+            # Sharp per-proposal engineer commentary (LLM, offline → deterministic template).
+            _insights = proposal_insights(app_name, pack.get("proposals", []))
+            for _p in pack.get("proposals", []):
+                _p["insight"] = _insights.get(_p["step_key"], "")
             wcag_fails = [c for c, vd in pack.get("wcag_conformance", {}).items() if vd == "fail"]
             blocked = [p["persona"] for p in pack["personas"] if p["verdict"] == "blocked"]
             q.put({"type": "node", "scope": "run", "node": "evidence",

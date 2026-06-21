@@ -7,6 +7,7 @@ from app.evidence.pack import (
     PersonaRunResult,
     build_friction_matrix,
     build_pack,
+    build_proposals,
     build_remediation,
     build_replay,
     lenses_for,
@@ -119,10 +120,58 @@ def test_pack_keeps_trusted_and_indicative_separate():
     assert pack["remediation"][0]["severity"] == "P0"
 
 
+def test_proposals_flag_behavioral_block_without_wcag():
+    # A dead-end at a critical step with NO axe violation — the gap build_remediation misses.
+    blocked = StepSignals(1, "verify", critical=True, dead_end=True, completed=False)
+    run = _run("elderly", [StepSignals(0, "home", dwell_s=3), blocked])
+    rem = build_remediation([run])
+    props = build_proposals([run])
+    assert rem == []                                       # remediation sees no WCAG fail
+    p = next(p for p in props if p["step_key"] == "verify")
+    assert p["severity"] == "P0"                           # blocked at a critical step
+    assert "elderly" in p["blocked_personas"]
+    assert p["fix"]                                        # a concrete instruction exists
+
+
+def test_proposals_flag_confusion_only():
+    confused = StepSignals(1, "address", dwell_s=4, llm_confusion=0.8)
+    run = _run("non_native", [StepSignals(0, "home", dwell_s=2), confused])
+    p = next(p for p in build_proposals([run]) if p["step_key"] == "address")
+    assert p["owner"] == "@content"
+    assert p["max_confusion"] == 0.8
+    assert "clarify" in p["fix"].lower()
+
+
+def test_proposals_prefer_wcag_owner():
+    run = _run("oku_motor", [
+        StepSignals(0, "pay", critical=False, wcag=(WcagSignal("1.4.3", False),),
+                    dwell_s=4, llm_confusion=0.9),
+    ])
+    p = build_proposals([run])[0]
+    assert p["owner"] == "@frontend"                       # WCAG routing wins over confusion
+    assert p["wcag_failures"] == ["1.4.3"]
+    assert "1.4.3" in p["fix"]
+
+
+def test_proposals_rank_by_severity():
+    p0 = _run("oku_visual", [_otp_blocked()])              # P0 block
+    p2 = _run("non_native", [StepSignals(0, "bio", dwell_s=4, llm_confusion=0.6)])  # confusion only
+    props = build_proposals([p0, p2])
+    assert props[0]["step_key"] == "otp"                   # P0 ranks first
+    assert props[0]["severity"] == "P0"
+
+
+def test_proposals_empty_when_clean():
+    clean = _run("control", [StepSignals(0, "home", dwell_s=3), _otp_clean()])
+    pack = build_pack("DemoBank", "2026-06-19T00:00:00Z", [clean])
+    assert pack["proposals"] == []
+
+
 def test_empty_pack_is_neutral():
     pack = build_pack("X", "2026-06-19T00:00:00Z", [])
     assert pack["inclusion_score"] == 1.0
     assert pack["remediation"] == []
+    assert pack["proposals"] == []
 
 
 def test_pack_carries_per_step_two_streams():

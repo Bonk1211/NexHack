@@ -21,6 +21,7 @@ from app.scoring.engine import (
     PersonaThresholds,
     ScoreResult,
     StepSignals,
+    _step_blocks,
     step_status,
 )
 
@@ -113,6 +114,126 @@ def build_remediation(runs: list[PersonaRunResult]) -> list[dict]:
                     "severity": sev,
                 }
     return sorted(worst.values(), key=lambda x: _SEVERITY_RANK.get(x["severity"], 4))
+
+
+# Confusion at/above this reads as "the persona didn't understand the step" (matches the
+# engine's friction band, engine.py _has_friction).
+_CONFUSION_BAR = 0.5
+
+
+def _proposal_owner(wcag_failures: list[str], *, confusion_driven: bool) -> str:
+    """WCAG failure routes via the criterion map; otherwise confusion/copy → @content,
+    pure dwell/flow → @frontend."""
+    if wcag_failures:
+        return route_owner(wcag_failures)
+    return "@content" if confusion_driven else "@frontend"
+
+
+def _propose_fix(
+    *,
+    wcag_failures: list[str],
+    blocked_personas: list[str],
+    max_confusion: float,
+    max_dwell_s: float | None,
+) -> tuple[str, str]:
+    """Turn the dominant signal on a step into (issue, engineer fix). Generic across apps
+    (no app-specific wording), same discipline as `_frame_caption`. Priority: trusted WCAG,
+    then a hard block, then confusion, then slow dwell."""
+    if wcag_failures:
+        crit = wcag_failures[0]
+        issue = _ISSUE_TEXT.get(crit, f"WCAG {crit} failure")
+        return issue, f"Fix WCAG {crit}: {issue.lower()}."
+    if blocked_personas:
+        n = len(blocked_personas)
+        return (
+            f"{n} persona{'s' if n != 1 else ''} could not get past this step",
+            "Add inline validation/error text and ensure the primary control is reachable "
+            "and labelled so the step can be completed.",
+        )
+    if max_confusion >= _CONFUSION_BAR:
+        return (
+            f"Step unclear (confusion {round(max_confusion, 2)})",
+            "Clarify the field label and instructions; add helper text so the expected "
+            "input is obvious.",
+        )
+    return (
+        f"Slow step (up to {max_dwell_s:.0f}s)" if max_dwell_s else "Slow step",
+        "Reduce reading load: shorten copy, simplify the layout, or split the screen.",
+    )
+
+
+def build_proposals(runs: list[PersonaRunResult]) -> list[dict]:
+    """Aggregate the friction + confusion signals per step into ranked engineer proposals.
+
+    Unlike `build_remediation` (trusted WCAG only), this surfaces behavioural-only problems
+    — a step that blocks or confuses a persona with NO axe violation (unlabelled field,
+    give-up dwell, high LLM confusion). Consumes `PersonaRunResult` directly so it reuses
+    `step_status`/`_step_blocks` on each persona's own thresholds, exactly like the matrix.
+    A step becomes a proposal when ANY persona is red/amber, or max confusion ≥ the bar.
+    """
+    step_keys: list[str] = []
+    for r in runs:
+        for s in r.steps:
+            if s.step_key not in step_keys:
+                step_keys.append(s.step_key)
+
+    proposals: list[dict] = []
+    for key in step_keys:
+        affected: list[str] = []
+        blocked: list[str] = []
+        dwells: list[float] = []
+        confusions: list[float] = []
+        wcag_fails: set[str] = set()
+        severities: list[str | None] = []
+        flagged = False
+
+        for r in runs:
+            s = next((st for st in r.steps if st.step_key == key), None)
+            if s is None:
+                continue  # persona never reached this step → contributes nothing
+            status = step_status(s, r.thresholds)
+            is_block = _step_blocks(s, r.thresholds)
+            dwells.append(s.dwell_s)
+            confusions.append(s.llm_confusion)
+            for sig in s.wcag:
+                if not sig.passed:
+                    wcag_fails.add(sig.criterion)
+            if status in ("red", "amber") or s.llm_confusion >= _CONFUSION_BAR:
+                affected.append(r.persona)
+                severities.append(r.result.persona_verdict.severity)
+                flagged = True
+            if is_block:
+                blocked.append(r.persona)
+
+        if not flagged:
+            continue
+
+        max_conf = max(confusions, default=0.0)
+        max_dwell = max(dwells, default=None) if dwells else None
+        wcag_sorted = sorted(wcag_fails)
+        confusion_driven = max_conf >= _CONFUSION_BAR and not wcag_sorted
+        severity = min(severities, key=lambda s: _SEVERITY_RANK.get(s, 4)) if severities else None
+        issue, fix = _propose_fix(
+            wcag_failures=wcag_sorted, blocked_personas=blocked,
+            max_confusion=max_conf, max_dwell_s=max_dwell,
+        )
+        proposals.append({
+            "step_key": key,
+            "severity": severity,
+            "owner": _proposal_owner(wcag_sorted, confusion_driven=confusion_driven),
+            "issue": issue,
+            "fix": fix,
+            "affected_personas": affected,
+            "blocked_personas": blocked,
+            "max_confusion": round(max_conf, 2),
+            "max_dwell_s": round(max_dwell, 2) if max_dwell is not None else None,
+            "wcag_failures": wcag_sorted,
+        })
+
+    return sorted(
+        proposals,
+        key=lambda p: (_SEVERITY_RANK.get(p["severity"], 4), -len(p["affected_personas"])),
+    )
 
 
 def _step_detail(s: StepSignals) -> dict:
@@ -242,6 +363,7 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
         "matrix": build_friction_matrix(runs),  # hero artifact (FR-3.3)
         "personas": personas,
         "remediation": build_remediation(runs),
+        "proposals": build_proposals(runs),   # behavioral+confusion rollup → engineer fixes
         # `screenshots`, `replay` (§14), and `synthesis` (§15) are attached by the run
         # graph's evidence node; `pdf_url`/`json_url` are filled on Storage upload
         # (app.repository) — all kept out of this PURE builder.

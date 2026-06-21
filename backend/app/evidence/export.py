@@ -169,6 +169,24 @@ def _render_pdf(pack: dict, target) -> None:
     if len(rem_rows) == 1:
         rem_rows.append(["—", "no remediation items", "—"])
     story.append(_table(rem_rows, colors.HexColor("#37474f")))
+    story.append(Spacer(1, 8 * mm))
+
+    # Proposed fixes — engineering: the behavioral + confusion rollup (derived, below the
+    # trusted remediation table above).
+    story.append(Paragraph("Proposed fixes — engineering", h2))
+    prop_rows = [["Severity", "Step", "Owner", "Proposed fix"]]
+    for p in pack.get("proposals", []):
+        prop_rows.append(
+            [
+                p.get("severity") or "—",
+                p.get("step_key", ""),
+                p.get("owner", ""),
+                p.get("fix", ""),
+            ]
+        )
+    if len(prop_rows) == 1:
+        prop_rows.append(["—", "—", "—", "no proposed fixes"])
+    story.append(_table(prop_rows, colors.HexColor("#37474f")))
 
     doc.build(story)
 

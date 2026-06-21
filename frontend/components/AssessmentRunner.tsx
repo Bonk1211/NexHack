@@ -614,6 +614,88 @@ function PersonaColumn({
   );
 }
 
+// Severity → accent. P0/P1 read as blocking (red), P2 as friction (amber), else neutral.
+const SEV_ACCENT: Record<string, { rail: string; badge: string; tint: string }> = {
+  P0: { rail: "bg-blocked", badge: "bg-blocked text-on-dark", tint: "bg-tint-blocked" },
+  P1: { rail: "bg-blocked", badge: "bg-blocked text-on-dark", tint: "bg-tint-blocked" },
+  P2: { rail: "bg-friction", badge: "bg-friction text-on-dark", tint: "bg-card" },
+  P3: { rail: "bg-tertiary", badge: "bg-field text-secondary", tint: "bg-card" },
+};
+
+type Proposal = NonNullable<Pack["proposals"]>[number];
+
+function ProposalCard({ p }: { p: Proposal }) {
+  const sev = p.severity ?? "P3";
+  const accent = SEV_ACCENT[sev] ?? SEV_ACCENT.P3;
+  const confusionPct = Math.round((p.max_confusion ?? 0) * 100);
+
+  return (
+    <div className={`relative overflow-hidden rounded-card ${accent.tint} pl-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]`}>
+      {/* severity rail */}
+      <span className={`absolute left-0 top-0 h-full w-[3px] ${accent.rail}`} />
+
+      <div className="p-4">
+        {/* Header: severity · step · owner */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${accent.badge}`}>{sev}</span>
+          <span className="font-mono text-[14px] font-medium text-primary">{p.step_key}</span>
+          <span className="ml-auto rounded-full bg-field px-2 py-0.5 text-[11px] font-medium text-secondary">
+            {p.owner}
+          </span>
+        </div>
+
+        {/* LLM sharp insight — the headline comment */}
+        {p.insight && (
+          <p className="mt-2.5 border-l-2 border-anchor/40 pl-3 text-[14px] font-medium leading-snug text-primary">
+            {p.insight}
+          </p>
+        )}
+
+        {/* Signal chips */}
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          {p.blocked_personas.length > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-tint-blocked px-2 py-0.5 text-[11px] font-medium text-blocked">
+              ⛔ {p.blocked_personas.length} blocked
+            </span>
+          )}
+          {p.max_confusion >= 0.5 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-field px-2 py-0.5 text-[11px] text-friction">
+              confusion
+              <span className="relative inline-block h-1.5 w-10 overflow-hidden rounded-full bg-tertiary/30 align-middle">
+                <span className="absolute left-0 top-0 h-full rounded-full bg-friction" style={{ width: `${confusionPct}%` }} />
+              </span>
+              {confusionPct}%
+            </span>
+          )}
+          {p.max_dwell_s != null && (
+            <span className="rounded-full bg-field px-2 py-0.5 text-[11px] text-secondary">
+              {p.max_dwell_s.toFixed(1)}s dwell
+            </span>
+          )}
+          {p.wcag_failures.map((c) => (
+            <span key={c} className="rounded-full bg-field px-2 py-0.5 text-[11px] font-medium text-secondary">
+              WCAG {c}
+            </span>
+          ))}
+        </div>
+
+        {/* Affected personas */}
+        {p.affected_personas.length > 0 && (
+          <div className="mt-2 text-[12px] text-tertiary">
+            affects {p.affected_personas.join(", ")}
+          </div>
+        )}
+
+        {/* Actionable fix */}
+        <div className="mt-3 rounded-lg bg-field/60 px-3 py-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-tertiary">Proposed fix</span>
+          <p className="mt-0.5 text-[13px] leading-relaxed text-secondary">{p.fix}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
   return (
     <section className="mt-8 space-y-8">
@@ -630,6 +712,23 @@ export function Results({ pack, runId, usage }: { pack: Pack; runId: string | nu
           <p className="mt-1 text-[13px] text-secondary">{pack.synthesis.narrative}</p>
         )}
       </div>
+
+      {/* Proposed fixes for engineering — aggregated from the friction + confusion signals */}
+      {pack.proposals && pack.proposals.length > 0 && (
+        <div>
+          <div className="mb-3 flex items-baseline justify-between">
+            <h2 className="section-label">Proposed fixes for engineering</h2>
+            <span className="text-[12px] text-tertiary">
+              {pack.proposals.length} issue{pack.proposals.length > 1 ? "s" : ""} · ranked by severity
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {pack.proposals.map((p) => (
+              <ProposalCard key={p.step_key} p={p} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {usage && (
         <div>

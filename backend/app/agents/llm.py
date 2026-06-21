@@ -664,3 +664,84 @@ def synthesize(pack: dict) -> SynthesisResult:
         logger.warning("synthesize LLM call failed (%s: %s); using template synthesis",
                        type(exc).__name__, exc)
         return fallback
+
+
+# --- proposal_insights (once-per-run sharp engineer commentary) --------------
+
+class _ProposalInsight(BaseModel):
+    step_key: str
+    insight: str = Field(description="ONE sharp sentence — a senior engineer's take on why this matters")
+
+
+class _ProposalInsights(BaseModel):
+    insights: list[_ProposalInsight] = Field(default_factory=list)
+
+
+_INSIGHT_SYSTEM = (
+    "You are a principal engineer reviewing an inclusion assessment. For each problematic "
+    "step you are given the aggregated signals (who was blocked, confusion level, dwell, WCAG "
+    "failures, severity). Write ONE sharp, specific sentence per step — the kind of comment "
+    "that makes an engineer fix it now: name the stakes (who is excluded / what breaks), be "
+    "concrete, no fluff, no restating the fix verbatim. "
+    "Respond ONLY with a JSON object of exactly this shape: "
+    '{"insights":[{"step_key":"<key>","insight":"<one sentence>"}, ...]}.'
+)
+
+
+def _template_insight(p: dict) -> str:
+    """Deterministic sharp line from the signals (offline / fallback)."""
+    sev = p.get("severity") or "P3"
+    affected = p.get("affected_personas") or []
+    blocked = p.get("blocked_personas") or []
+    step = p.get("step_key", "this step")
+    if blocked:
+        who = ", ".join(blocked)
+        return f"{sev}: {who} cannot get past “{step}” — this is a hard exclusion, not friction."
+    if (p.get("max_confusion") or 0) >= 0.5:
+        return f"{sev}: “{step}” reads as ambiguous to {len(affected)} persona(s) — they guess instead of knowing."
+    if p.get("wcag_failures"):
+        return f"{sev}: “{step}” fails {', '.join(p['wcag_failures'])} — a trusted, citable accessibility defect."
+    return f"{sev}: “{step}” slows {len(affected)} persona(s) enough to risk drop-off."
+
+
+def proposal_insights(app: str, proposals: list[dict]) -> dict[str, str]:
+    """Once-per-run sharp commentary, one line per proposal. Offline/error → deterministic
+    template. Returns {step_key: insight}. Mirrors `synthesize` (§15) — LLM is OUTPUT-side
+    polish only; the deterministic `fix`/`issue` always stand on their own (§16)."""
+    fallback = {p["step_key"]: _template_insight(p) for p in proposals}
+    if not proposals:
+        return {}
+    client = _client(settings.llm_model_synth)
+    if client is None:
+        return fallback
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        compact = json.dumps({
+            "app": app,
+            "proposals": [
+                {k: p.get(k) for k in ("step_key", "severity", "owner", "issue",
+                                       "affected_personas", "blocked_personas",
+                                       "max_confusion", "max_dwell_s", "wcag_failures")}
+                for p in proposals
+            ],
+        })[:6000]
+        ai = client.invoke(
+            [SystemMessage(content=_INSIGHT_SYSTEM), HumanMessage(content=compact)],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(model_name or settings.llm_model_synth, prompt_tokens, completion_tokens)
+
+        payload = json.loads(_extract_text(ai.content))
+        parsed = _ProposalInsights.model_validate(payload)
+        out = {i.step_key: i.insight for i in parsed.insights if i.insight}
+        # Any step the model skipped keeps its deterministic line.
+        return {**fallback, **out}
+    except Exception as exc:
+        logger.warning("proposal_insights LLM call failed (%s: %s); using template",
+                       type(exc).__name__, exc)
+        return fallback

@@ -68,6 +68,19 @@ export interface Pack {
   matrix: { steps: string[]; rows: Record<string, Record<string, MatrixCell>> };
   personas: PersonaResult[];
   remediation: { criterion: string; issue: string; owner: string; severity: string | null }[];
+  proposals?: {
+    step_key: string;
+    severity: string | null;
+    owner: string;
+    issue: string;
+    fix: string;
+    insight?: string;
+    affected_personas: string[];
+    blocked_personas: string[];
+    max_confusion: number;
+    max_dwell_s: number | null;
+    wcag_failures: string[];
+  }[];
   replay: Record<string, ReplayClip>;
   synthesis?: { rollup: string; narrative: string; key_exclusions: string[] };
 }
