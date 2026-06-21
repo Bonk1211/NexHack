@@ -2,6 +2,7 @@
 must be visible and tunable for defensibility)."""
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,18 +14,22 @@ class Settings(BaseSettings):
     storage_bucket: str = "evidence"   # Supabase Storage bucket for screenshots + packs
     artifacts_dir: str = ".artifacts"  # local per-run screenshot store (served at /artifacts)
 
-    # Model family LOCKED to DeepSeek V4 (§25 resolved). Two-tier: cheap per-step
-    # vision (flash), larger once-per-run synthesis (pro). The client is DeepSeek-only
-    # by construction (app.agents.llm), so there is no provider switch to misconfigure.
-    llm_model_step: str = "deepseek-v4-flash"      # comprehend (per-step vision)
-    llm_model_synth: str = "deepseek-v4-pro"       # synthesize (once per run)
-    llm_api_key: str = ""                          # empty => deterministic offline fallback
-    llm_base_url: str = "https://api.deepseek.com"  # OpenAI-compatible endpoint
-    llm_pricing: str = (
-        '{"deepseek-v4-flash":{"prompt":0.00014,"completion":0.00028},'
-        '"deepseek-v4-pro":{"prompt":0.00174,"completion":0.00348}}'
+    # Qwen (Alibaba DashScope), OpenAI-compatible endpoint. Two-tier: cheap per-step
+    # vision (flash), larger once-per-run synthesis (plus). The ChatDeepSeek client is a
+    # ChatOpenAI subclass, so it drives any OpenAI-compatible endpoint unchanged (§25).
+    llm_model_step: str = "qwen-flash"             # comprehend (per-step vision)
+    llm_model_synth: str = "qwen3.7-plus"          # synthesize (once per run)
+    # Reads DASHSCOPE_API_KEY (Qwen) or LLM_API_KEY; empty => deterministic offline fallback.
+    llm_api_key: str = Field(
+        default="", validation_alias=AliasChoices("LLM_API_KEY", "DASHSCOPE_API_KEY")
     )
-    # Source: DeepSeek V4 pricing (Apidog, Apr 24 2026) — USD per 1K tokens
+    llm_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    # ponytail: pricing is indicative cost display only (not marks). Verify rates per
+    # DashScope billing if cost accuracy matters; unknown keys just show $0.
+    llm_pricing: str = (
+        '{"qwen-flash":{"prompt":0.00005,"completion":0.0004},'
+        '"qwen3.7-plus":{"prompt":0.0004,"completion":0.0012}}'
+    )
     llm_pricing_currency: str = "USD"
 
     dashscope_api_key: str = ""          # Alibaba DashScope — figurine image generation

@@ -30,6 +30,7 @@ import concurrent.futures
 import hashlib
 import pathlib
 import random
+import tempfile
 from urllib.parse import urlparse
 
 from langgraph.graph import END, StateGraph
@@ -59,6 +60,95 @@ from app.llm_usage import current_tracker, set_tracker
 
 def _bp(state: PersonaState) -> dict:
     return state.get("behavior_profile", {})
+
+
+# Generated test files for upload steps, one per kind, made once and reused.
+_UPLOAD_CACHE: dict[str, str] = {}
+
+
+def _test_upload_path(accept: str) -> str:
+    """A throwaway test file matching the input's `accept` (image vs pdf), generated once.
+
+    Most upload forms just need *a* valid file of the right type; we draw a plausible
+    ID-card-ish image so even a thumbnail preview looks right. PIL writes a real PDF when the
+    extension is .pdf, covering document uploads too."""
+    kind = "pdf" if "pdf" in (accept or "").lower() else "image"
+    if kind in _UPLOAD_CACHE:
+        return _UPLOAD_CACHE[kind]
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (640, 400), (210, 225, 245))
+    d = ImageDraw.Draw(img)
+    d.rectangle([12, 12, 628, 388], outline=(40, 70, 120), width=4)
+    for i, line in enumerate(("TEST DOCUMENT", "Name: Test User", "ID: 123456-01-1234")):
+        d.text((40, 70 + i * 48), line, fill=(20, 40, 90))
+    ext = "pdf" if kind == "pdf" else "jpg"
+    p = str(pathlib.Path(tempfile.gettempdir()) / f"nexhack_upload.{ext}")
+    img.save(p)
+    _UPLOAD_CACHE[kind] = p
+    return p
+
+
+def _pending_select(page) -> dict | None:
+    """First UNSET native <select> on the page as a fill action, else None.
+
+    The LLM planner routinely skips dropdowns (it fills the text fields and jumps to the
+    CTA), so a required <select> left on its placeholder silently blocks the form. Like
+    uploads, choose for it deterministically: find a select still on its empty/placeholder
+    option and pick the first REAL option, targeting by accessible name."""
+    try:
+        return page.evaluate("""() => {
+          const sels = [...document.querySelectorAll('select')];
+          for (let i = 0; i < sels.length; i++) {
+            const s = sels[i];
+            const cur = s.options[s.selectedIndex];
+            const unset = !s.value || /^(—|-{1,}|select|choose|please|pilih|sila)/i
+              .test((cur && cur.text || '').trim());
+            if (!unset) continue;
+            // A name from an ADJACENT form control is wrong (it's that control's text, e.g.
+            // the previous <select>'s options) — only trust real labels, else fall back to
+            // nth targeting (name '').
+            const sib = s.previousElementSibling;
+            const sibText = sib && !/^(SELECT|INPUT|BUTTON|TEXTAREA)$/.test(sib.tagName)
+              ? sib.innerText : '';
+            const name = s.getAttribute('aria-label')
+              || (s.labels && s.labels[0] && s.labels[0].innerText)
+              || (s.id && document.querySelector('label[for="' + s.id + '"]')?.innerText)
+              || sibText || '';
+            const opt = [...s.options].find((o, idx) => idx > 0 && o.value !== ''
+              && !/^(—|-{1,})$/.test(o.text.trim()));
+            return {nth: i, name: name.replace(/\\s+/g, ' ').trim().slice(0, 40),
+                    value: opt ? opt.text : ''};
+          }
+          return null;
+        }""")
+    except Exception:
+        return None
+
+
+def _pending_upload(page) -> dict | None:
+    """First UNFILLED <input type=file> on the page as an upload action, else None.
+
+    File inputs are hidden behind styled dropzones, so they never surface in the a11y tree
+    the planner sees — uploads would otherwise stall the walk (the CTA stays disabled and
+    the dropzone div has no actionable role). Surfacing the input here lets `act` set a file
+    on it deterministically. Returns the input's index + accept + a human label."""
+    try:
+        return page.evaluate("""() => {
+          const ins = [...document.querySelectorAll('input[type=file]')];
+          for (let i = 0; i < ins.length; i++) {
+            if (ins[i].files.length === 0) {
+              const raw = ins[i].getAttribute('aria-label')
+                || ins[i].closest('label')?.innerText
+                || ins[i].parentElement?.innerText || 'file';
+              const lbl = raw.replace(/\\s+/g, ' ').trim().slice(0, 40) || 'file';
+              return {nth: i, accept: ins[i].accept || '', label: lbl};
+            }
+          }
+          return null;
+        }""")
+    except Exception:
+        return None
 
 
 def load(state: PersonaState) -> dict:
@@ -145,6 +235,27 @@ def plan(state: PersonaState) -> dict:
                 "current_labeled": labeled}
 
     # AUTONOMOUS
+    # An unfilled file input on this screen is handled deterministically (the planner can't
+    # see hidden inputs) and BEFORE the CTA, which is usually gated on the upload.
+    pend = _pending_upload(state["page"])
+    if pend is not None:
+        label = pend.get("label") or "file"
+        action = {"action": "upload", "role": "", "name": label, "nth": pend.get("nth", 0),
+                  "value": pend.get("accept", ""), "key": f"upload:{label}",
+                  "critical": True, "reason": "upload required document"}
+        return {"current_action": action, "last_confusion": 0.0,
+                "last_fallback": None, "last_reason": "upload", "current_labeled": True}
+
+    # An unset <select> is chosen deterministically too — the LLM tends to skip dropdowns.
+    psel = _pending_select(state["page"])
+    if psel is not None:
+        name = psel.get("name") or ""        # '' => act targets by nth (unnamed selects)
+        action = {"action": "fill", "role": "combobox", "name": name, "nth": psel.get("nth", 0),
+                  "value": psel.get("value", ""), "key": f"fill:{name or 'dropdown'}",
+                  "critical": True, "reason": "choose dropdown option"}
+        return {"current_action": action, "last_confusion": 0.0,
+                "last_fallback": None, "last_reason": "select", "current_labeled": True}
+
     a = plan_action(state.get("aria", ""), state.get("goal", ""),
                     state.get("action_history", []), state["rng"],
                     current_screen_key=state.get("current_screen_key", ""))
@@ -193,7 +304,7 @@ def decide(state: PersonaState) -> dict:
     cycle = over_cap = False
     if is_autonomous:
         sig = f"{state.get('current_screen_key', '')}:{_action_signature(act_chosen)}"
-        cycle = (act_chosen.get("action") in ("fill", "click")
+        cycle = (act_chosen.get("action") in ("fill", "click", "upload")
                  and sig in state.get("seen_signatures", []))
         over_cap = state["step_count"] >= int(state.get("max_steps", 50))
     retries = 1 if rng.random() < hesitation_prob else 0
@@ -381,6 +492,17 @@ def act(state: PersonaState) -> dict:
                 terminate = True   # exhausted + cannot go back => end the walk
             else:
                 barrier = True
+    elif effective == "upload":
+        # A file input is hidden behind a styled dropzone, so it never appears in the a11y
+        # tree and can't be .fill()ed. Set a generated test file on the input directly —
+        # Playwright forces hidden inputs and fires the change event, so the app's upload
+        # handler runs exactly as if the user had picked a file (no native dialog needed).
+        try:
+            page.locator("input[type=file]").nth(nth).set_input_files(
+                _test_upload_path(act_chosen.get("value", "")), timeout=5000)
+            _settle(page)
+        except Exception:
+            barrier = True
     elif effective in ("fill", "click"):
         try:
             if effective == "fill" and role in _SELECT_ROLES:
@@ -427,7 +549,19 @@ def act(state: PersonaState) -> dict:
     dead_end = barrier
     completed = not barrier
 
-    key = act_chosen.get("key") or f"step{idx}"
+    # SCRIPTED: keep the FlowStep's key (contract — the matrix columns are the fixed flow).
+    # AUTONOMOUS: derive a CANONICAL key from the action's identity, NOT the planner's
+    # freeform `key`. Different personas (and the LLM run-to-run) label the same step
+    # differently ("click:Continue" vs "click:Continue button"), which would scatter the
+    # friction matrix into one column per label and show "NA" everywhere the labels didn't
+    # happen to match. Keying on action+name (or action+role#nth for unnamed controls) makes
+    # the same logical step collapse to ONE column across every persona.
+    if is_autonomous:
+        _nm = (act_chosen.get("name") or "").strip()
+        _role = act_chosen.get("role") or "control"
+        key = f"{action}:{_nm}" if _nm else f"{action}:{_role}#{int(act_chosen.get('nth', 0) or 0)}"
+    else:
+        key = act_chosen.get("key") or f"step{idx}"
     step = StepSignals(
         step_idx=idx,
         step_key=key,
@@ -509,6 +643,10 @@ def _run_persona_sync(payload: PersonaInput) -> PersonaState:
     browser = p.chromium.launch()
     try:
         page = browser.new_page(**p.devices[payload.get("viewport", "iPhone 13")])
+        # Safety net: if any click opens a native file chooser (instead of a hidden input we
+        # set directly), answer it with the test file so the run never hangs on the dialog.
+        page.on("filechooser", lambda fc: fc.set_files(_test_upload_path(""))
+                if not fc.is_multiple() else fc.set_files([_test_upload_path("")]))
         state: PersonaState = {
             **payload,
             "page": page,
