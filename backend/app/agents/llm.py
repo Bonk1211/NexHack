@@ -310,6 +310,23 @@ def _upload_say(persona_voice: str) -> str:
     return "Let me upload my document here."
 
 
+def _say_language(persona_voice: str) -> str:
+    """Resolve the language the agent's `say` should be written in, from persona_voice.
+
+    The behavior_prompt is English prose, so without an explicit directive the model
+    writes `say` in English even for a non-English persona. Map the 'language=' field
+    to a clear instruction; default to that persona's natural language verbatim.
+    """
+    v = persona_voice.lower()
+    if "cantonese" in v:
+        return "colloquial written Cantonese (粤语)"
+    if "iban" in v:
+        return "Bahasa Melayu"
+    if "bahasa" in v or "melayu" in v:
+        return "Bahasa Melayu"
+    return "English"
+
+
 def _handle_pending_upload(page, handled: set, artifact_dir: str | None) -> str | None:
     """Set any not-yet-handled file <input> with the fixture image. Returns a human
     line on success, else None. Keyed by URL+index so each page's upload fires once
@@ -452,7 +469,11 @@ def run_agent(
             if h.get("assistant"):
                 turn_msgs.append(SystemMessage(content=h["assistant"]))
 
-        persona_line = f"PERSONA (speak in this voice for 'say'): {persona_voice}\n" if persona_voice else ""
+        persona_line = (
+            f"PERSONA (speak in this voice for 'say'): {persona_voice}\n"
+            f"Write the 'say' sentence in {_say_language(persona_voice)}, "
+            "first-person, regardless of the language of this instruction.\n"
+        ) if persona_voice else ""
         user_msg = (
             persona_line +
             f"GOAL: {goal}\n"
