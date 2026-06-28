@@ -773,6 +773,19 @@ function ReplayCard({
   const src = cur ? mediaUrl(cur.screenshot_url) : null;
   const go = (d: number) => setIdx((i) => (i + d + n) % n);
 
+  // Warm the browser cache for every frame once the carousel opens, so paging
+  // Next/Prev is instant instead of fetching each image on click.
+  useEffect(() => {
+    if (!open) return;
+    for (const f of clip.frames) {
+      const u = mediaUrl(f.screenshot_url);
+      if (u) {
+        const img = new window.Image();
+        img.src = u;
+      }
+    }
+  }, [open, clip.frames]);
+
   return (
     <div className={`rounded-card p-4 ${blocked ? "bg-tint-blocked border-l-[3px] border-blocked" : "bg-card"}`}>
       <div className="flex flex-wrap items-center gap-2">
@@ -815,11 +828,11 @@ function ReplayCard({
                 alt={`${cur.step_key} as ${persona} saw it`}
                 loading="lazy"
                 decoding="async"
-                className="h-auto max-h-[70vh] w-full object-contain"
+                className="mx-auto h-[360px] w-full object-contain"
                 style={{ filter: filter || undefined }}
               />
             ) : (
-              <div className="flex h-[320px] items-center justify-center text-[12px] text-tertiary">no frame</div>
+              <div className="flex h-[360px] items-center justify-center text-[12px] text-tertiary">no frame</div>
             )}
             {n > 1 && (
               <>

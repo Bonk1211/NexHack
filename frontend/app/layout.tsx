@@ -21,9 +21,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${GeistSans.variable} ${instrument.variable}`}>
       <body>
         <div className="grain-overlay" aria-hidden />
-        <div className="relative z-10 flex min-h-screen">
+        <div className="relative z-10 min-h-screen">
           <Sidebar />
-          <main className="ml-[240px] flex-1">{children}</main>
+          {/* Sidebar is fixed (240px); margin-left clears it. No flex-1 — that would
+              make main 100vw wide and the margin would then overflow horizontally. */}
+          <main className="ml-[240px] min-w-0">{children}</main>
         </div>
       </body>
     </html>

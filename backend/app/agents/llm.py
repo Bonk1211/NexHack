@@ -291,6 +291,25 @@ def _upload_fixture_path(artifact_dir: str | None) -> str:
     return str(p)
 
 
+# Localized line for the deterministic upload step (the LLM can't author a file, so
+# this `say` doesn't pass through the model — without this it was always English,
+# clashing with a non-English persona's monologue). Substring match on persona_voice's
+# "language=..." field; default English.
+_UPLOAD_SAY = {
+    "cantonese": "等我上載我份文件先。",
+    "bahasa": "Biar saya muat naik dokumen saya di sini.",
+    "iban": "Biar saya muat naik dokumen saya di sini.",
+}
+
+
+def _upload_say(persona_voice: str) -> str:
+    v = persona_voice.lower()
+    for lang, line in _UPLOAD_SAY.items():
+        if lang in v:
+            return line
+    return "Let me upload my document here."
+
+
 def _handle_pending_upload(page, handled: set, artifact_dir: str | None) -> str | None:
     """Set any not-yet-handled file <input> with the fixture image. Returns a human
     line on success, else None. Keyed by URL+index so each page's upload fires once
@@ -403,8 +422,9 @@ def run_agent(
         # pending file <input> before it gets stuck, then re-observe and continue.
         up = _handle_pending_upload(page, uploaded, artifact_dir)
         if up:
+            upload_say = _upload_say(persona_voice)
             if on_say:
-                on_say("Let me upload my document here.")
+                on_say(upload_say)
             shot = None
             if artifact_dir:
                 d = _pl.Path(artifact_dir)
@@ -417,7 +437,7 @@ def run_agent(
             step = StepSignals(
                 step_idx=idx, step_key="upload document", critical=True,
                 dwell_s=0, retries=0, dead_end=False, completed=True,
-                llm_confusion=0, reading_grade=grade, say="Let me upload my document here.",
+                llm_confusion=0, reading_grade=grade, say=upload_say,
             )
             steps.append(step)
             if shot:

@@ -51,6 +51,15 @@ html {
   color-scheme: light;
 }
 
+/* Lock the page to vertical scroll only — a stray wide child clips instead of
+   forcing a horizontal scrollbar. Internal overflow-x-auto containers (e.g. the
+   friction matrix) still scroll inside themselves. */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
 body {
   margin: 0;
   background: var(--color-field);

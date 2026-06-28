@@ -52,6 +52,12 @@ def _row_to_persona_config(row: dict) -> dict:
         "label": row.get("label", ""),
         "language": row.get("language", "English"),
         "disabilities": row.get("disabilities") or [],
+        # Voice fields — drive the agent's in-character `say` monologue (runs.py).
+        # Dropping these is why DB/staging personas spoke generically.
+        "age_band": row.get("age_band", ""),
+        "tech_savviness": row.get("tech_savviness", ""),
+        "patience": row.get("patience", ""),
+        "behavior_prompt": row.get("behavior_prompt", ""),
         "behavior_profile": {
             "dwell_multiplier": float(bp.get("dwell_multiplier", 1.0)),
             "hesitation_prob": float(bp.get("hesitation_prob", 0.0)),
