@@ -334,6 +334,8 @@ def agent(state: PersonaState) -> dict:
         current_url=state.get("current_url", ""),
         url_visit_counts=state.get("url_visit_counts") or {},
         step_idx=state["step_idx"],
+        persona_voice=state.get("persona_voice", ""),
+        on_say=state.get("on_say"),
     )
     # Merge accumulated steps and shots into the state reducers
     out = dict(result)
@@ -407,7 +409,7 @@ def _run_persona_sync(payload: PersonaInput) -> PersonaState:
         p.stop()
 
 
-def stream_persona(payload: PersonaInput, on_frame=None):
+def stream_persona(payload: PersonaInput, on_frame=None, on_say=None):
     """Yield (node_name, update) for each subgraph step as it runs — LIVE.
 
     The streaming counterpart of `run_persona`: instead of one `.invoke`, it drives
@@ -450,6 +452,7 @@ def stream_persona(payload: PersonaInput, on_frame=None):
         state: PersonaState = {
             **payload,
             "page": page,
+            "on_say": on_say,
             "rng": random.Random(payload["seed"]),
             "step_idx": 0,
             "steps": [],

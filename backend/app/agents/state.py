@@ -51,6 +51,7 @@ class PersonaInput(TypedDict, total=False):
     hints: dict                      # values agent must use: {"phone": "...", "otp": "..."}
     success_url: str                 # URL suffix that means goal achieved, e.g. "/rewards"
     success_element: str             # a11y text that means goal achieved, e.g. 'heading "Welcome"'
+    persona_voice: str               # compact voice context — makes the agent's `say` in-character
 
 
 class PersonaState(PersonaInput, total=False):
@@ -62,6 +63,7 @@ class PersonaState(PersonaInput, total=False):
     # In-process only (NOT checkpoint-serializable; stay inside the subgraph invoke)
     page: Any
     rng: Any
+    on_say: Any                          # callback(text) — emits each monologue line LIVE
 
     # Trusted page-level signals, captured once on entry (§10)
     aria: str

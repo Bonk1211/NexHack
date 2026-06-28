@@ -171,9 +171,11 @@ export type StreamEvent =
       status: "green" | "amber" | "red";
       confusion: number;
       dwell_s: number;
+      monologue?: string; // first-person line the persona "says" on this step
       screenshot_url: string | null;
       output?: NodeOutput;
     }
+  | { type: "monologue"; persona: string; text: string } // live first-person line, per agent turn
   | { type: "persona_done"; persona: string; verdict: string; severity: string | null; blocked_at: string | null }
   | { type: "frame"; persona: string; data: string } // base64 JPEG of the live browser
   | { type: "usage"; summary: UsageSummary }

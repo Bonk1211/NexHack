@@ -53,6 +53,7 @@ interface NodeCardItem {
   status?: string; // step status (red/amber/green) where applicable
   output?: Record<string, unknown>;
   screenshot_url?: string | null;
+  monologue?: string; // first-person line the persona "says" on this step
 }
 export interface LiveState {
   runNodes: string[]; // run-scope nodes seen, in order (for the pipeline bar)
@@ -84,8 +85,11 @@ export function reduce(s: LiveState, e: StreamEvent): LiveState {
   if (e.type === "step") {
     return push(s, {
       scope: "persona", node: "act", persona: e.persona, status: e.status,
-      output: e.output, screenshot_url: e.screenshot_url,
+      output: e.output, screenshot_url: e.screenshot_url, monologue: e.monologue,
     });
+  }
+  if (e.type === "monologue") {
+    return push(s, { scope: "persona", node: "say", persona: e.persona, monologue: e.text });
   }
   if (e.type === "persona_start") {
     return push(s, { scope: "persona", node: "start", persona: e.persona, output: { label: e.label } });
@@ -490,6 +494,46 @@ export function LiveView({
   );
 }
 
+// Chat-bubble feed of the persona's first-person monologue. History renders static;
+// only the latest line animates char-by-char (typewriter).
+function MonologueFeed({ lines }: { lines: { id: number; text: string }[] }) {
+  const last = lines[lines.length - 1];
+  const typed = useTypewriter(last?.text ?? "");
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-1.5">
+      {lines.map((l, i) => (
+        <div
+          key={l.id}
+          className="rounded-2xl rounded-tl-sm bg-anchor/10 px-3 py-1.5 text-[12px] leading-snug text-primary"
+        >
+          {i === lines.length - 1 ? typed : l.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Reveal `text` one character at a time. Resets whenever the line changes.
+function useTypewriter(text: string, msPerChar = 24) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    setN(0);
+    if (!text) return;
+    const id = setInterval(() => {
+      setN((c) => {
+        if (c >= text.length) {
+          clearInterval(id);
+          return c;
+        }
+        return c + 1;
+      });
+    }, msPerChar);
+    return () => clearInterval(id);
+  }, [text, msPerChar]);
+  return text.slice(0, n);
+}
+
 // One persona's live lane: its CDP screencast frame above its own node feed. Each
 // column owns its scroll ref so feeds autoscroll independently.
 function PersonaColumn({
@@ -504,11 +548,15 @@ function PersonaColumn({
   personaInfo?: { name: string; figurineUrl?: string };
 }) {
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
   }, [items.length]);
 
   const displayName = personaInfo?.name ?? persona;
+  const monologue = items
+    .filter((it) => it.monologue)
+    .map((it) => ({ id: it.id, text: it.monologue as string }));
 
   return (
     <div className="rounded-card bg-card p-3">
@@ -549,13 +597,38 @@ function PersonaColumn({
         <div className="mx-auto mt-2 h-[4px] w-[36px] rounded-full bg-gray-300" />
       </div>
 
-      <div ref={feedRef} className="mt-3 max-h-[280px] space-y-2 overflow-y-auto pr-1">
-        {items.length === 0 ? (
-          <p className="text-[12px] text-tertiary">waiting for nodes…</p>
-        ) : (
-          items.map((item) => <NodeOutputCard key={item.id} item={item} />)
-        )}
+      {/* Toggle: raw node cards are secondary, hidden behind this by default */}
+      <div className="mt-3 flex justify-end">
+        <button
+          onClick={() => setShowDetails((v) => !v)}
+          className="text-[11px] text-tertiary hover:text-secondary"
+        >
+          {showDetails ? "Hide node details" : "Show node details"}
+        </button>
       </div>
+
+      {showDetails ? (
+        // Raw graph-execution cards
+        <div ref={feedRef} className="mt-2 max-h-[280px] space-y-2 overflow-y-auto pr-1">
+          {(() => {
+            const nodeCards = items.filter((it) => it.node !== "say");
+            return nodeCards.length === 0 ? (
+              <p className="text-[12px] text-tertiary">waiting for nodes…</p>
+            ) : (
+              nodeCards.map((item) => <NodeOutputCard key={item.id} item={item} />)
+            );
+          })()}
+        </div>
+      ) : (
+        // First-person monologue — primary live view
+        <div ref={feedRef} className="mt-2 max-h-[280px] overflow-y-auto pr-1">
+          {monologue.length === 0 ? (
+            <p className="text-[12px] text-tertiary">waiting for the persona to speak…</p>
+          ) : (
+            <MonologueFeed lines={monologue} />
+          )}
+        </div>
+      )}
     </div>
   );
 }

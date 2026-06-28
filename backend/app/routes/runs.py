@@ -400,6 +400,14 @@ def stream_run(
                 cfg = {**load_persona(name), "stem": name}
                 thresholds = thresholds_for(cfg)
                 flow_cfg = _resolve_flow(app_name)
+                # Compact voice context so the agent's first-person `say` is in character.
+                # DB rows may omit some keys — .get keeps it safe.
+                persona_voice = (
+                    f"{cfg.get('name', name)}; tech_savviness={cfg.get('tech_savviness', '?')}; "
+                    f"patience={cfg.get('patience', '?')}; language={cfg.get('language', 'en')}; "
+                    f"disabilities={', '.join(cfg.get('disabilities', [])) or 'none'}. "
+                    f"{cfg.get('behavior_prompt', '')}"
+                ).strip()
                 payload = {
                     "persona": name,
                     "persona_idx": i,
@@ -416,6 +424,7 @@ def stream_run(
                     "hints": flow_cfg.get("hints") or {},
                     "success_url": flow_cfg.get("success_url", ""),
                     "success_element": flow_cfg.get("success_element", ""),
+                    "persona_voice": persona_voice,
                 }
                 q.put({"type": "persona_start", "persona": name, "idx": i,
                        "label": cfg.get("name", name)})
@@ -426,8 +435,13 @@ def stream_run(
                     except queue.Full:
                         pass  # drop the frame — keep the live view current, not buffered
 
+                def on_say(text, _name=name):
+                    # Per-turn monologue, emitted LIVE (the agent node returns all steps
+                    # at once, so this is the only way the bubbles stream as they happen).
+                    q.put({"type": "monologue", "persona": _name, "text": text})
+
                 steps, shots = [], []
-                for node, data in stream_persona(payload, on_frame=on_frame):
+                for node, data in stream_persona(payload, on_frame=on_frame, on_say=on_say):
                     if node == "agent":
                         # MCP agent — emits multiple steps per graph node invocation.
                         agent_steps = data.get("steps") or []

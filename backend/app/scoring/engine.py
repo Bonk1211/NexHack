@@ -40,6 +40,7 @@ class StepSignals:
     completed: bool = True
     llm_confusion: float = 0.0                   # 0-1, vision-LLM "I don't know this field"
     reading_grade: Optional[float] = None        # Flesch-Kincaid grade of step copy
+    say: str = ""                                # first-person monologue line for this step (live view only)
 
 
 @dataclass(frozen=True)

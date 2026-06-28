@@ -202,9 +202,9 @@ _MCP_SYSTEM = (
     "You have FULL control of the browser via a Playwright `page` object (sync API).\n\n"
     "Respond with ONE of these JSON forms:\n\n"
     '  {"exec": "<Playwright Python code>", "step_label": "<what you just did>", '
-    '"confusion": <0.0-1.0>, "reasoning": "<one sentence>"}\n\n'
-    '  {"done": true, "reasoning": "<why goal is achieved>"}\n\n'
-    '  {"blocked": true, "reasoning": "<why no path forward>"}\n\n'
+    '"confusion": <0.0-1.0>, "reasoning": "<one sentence>", "say": "<one short first-person sentence>"}\n\n'
+    '  {"done": true, "reasoning": "<why goal is achieved>", "say": "<one short first-person sentence>"}\n\n'
+    '  {"blocked": true, "reasoning": "<why no path forward>", "say": "<one short first-person sentence>"}\n\n'
     "The `page` object is in scope. You can call any sync Playwright method on it:\n"
     "  page.get_by_role('textbox', name='Mobile Number').fill('0123456789')\n"
     "  page.get_by_role('button', name='Continue').click()\n"
@@ -224,7 +224,10 @@ _MCP_SYSTEM = (
     "4. For OTP: fill individual 'Digit N' fields one at a time.\n"
     "5. For dropdowns: use select_option() on the element directly — try "
     "get_by_label, then get_by_role, then locator.\n"
-    "6. Confusion 0.0=obvious, 1.0=very confused but keep trying."
+    "6. Confusion 0.0=obvious, 1.0=very confused but keep trying.\n"
+    "7. 'say' is ONE short first-person sentence in THIS persona's voice — what you're "
+    "thinking or feeling right now (doubt, relief, confusion, impatience). Stay fully in "
+    "character; never mention being an AI, a test, a screen reader, or an accessibility tree."
 )
 
 # Whitelist of safe page methods for exec(). The LLM can only call methods
@@ -267,6 +270,50 @@ def _play_exec(page, code: str) -> str:
         return f"ERROR:\n{err}"
 
 
+# A 1×1 JPEG — the smallest valid image we can hand a file <input>. The agent can't
+# author files (the exec sandbox blocks the filesystem) and the LLM has no path, so
+# document-upload steps are handled deterministically with this fixture.
+_UPLOAD_JPEG_B64 = (
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAP//////////////////////////////////////////"
+    "////////////////////////////////////////////////wAALCAABAAEBAREA/8QAFAABAAAA"
+    "AAAAAAAAAAAAAAAAA//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AfwD/2Q=="
+)
+
+
+def _upload_fixture_path(artifact_dir: str | None) -> str:
+    """Write the fixture image to disk once and return its path."""
+    import base64, pathlib, tempfile
+    base = pathlib.Path(artifact_dir) if artifact_dir else pathlib.Path(tempfile.gettempdir())
+    base.mkdir(parents=True, exist_ok=True)
+    p = base / "nexhack_upload.jpg"
+    if not p.exists():
+        p.write_bytes(base64.b64decode(_UPLOAD_JPEG_B64))
+    return str(p)
+
+
+def _handle_pending_upload(page, handled: set, artifact_dir: str | None) -> str | None:
+    """Set any not-yet-handled file <input> with the fixture image. Returns a human
+    line on success, else None. Keyed by URL+index so each page's upload fires once
+    and we never loop forever on a hidden input the LLM can't satisfy."""
+    try:
+        inputs = page.locator('input[type="file"]')
+        n = inputs.count()
+    except Exception:
+        return None
+    for i in range(n):
+        key = f"{page.url}#{i}"
+        if key in handled:
+            continue
+        handled.add(key)
+        try:
+            inputs.nth(i).set_input_files(_upload_fixture_path(artifact_dir))
+            page.wait_for_load_state("networkidle", timeout=3000)
+            return "Uploaded nexhack_upload.jpg"
+        except Exception:
+            continue  # not settable (e.g. detached) — move on, key stays marked
+    return None
+
+
 def run_agent(
     page,
     *,
@@ -285,6 +332,8 @@ def run_agent(
     current_url: str = "",
     url_visit_counts: dict | None = None,
     step_idx: int = 0,
+    persona_voice: str = "",
+    on_say=None,
 ) -> dict:
     """Multi-turn LLM agent with full Playwright `exec` access.
 
@@ -317,11 +366,32 @@ def run_agent(
     max_turns = 20
     stuck_limit = 20
 
-    def _snap() -> str:
-        return f"Current URL: {page.url}\nAccessibility tree:\n{page.locator('body').aria_snapshot()}"
+    def _field_values() -> str:
+        """List each form field's current value. The a11y tree omits values, so without
+        this a weak model re-fills an already-filled field forever (it looks empty)."""
+        try:
+            vals = page.evaluate(
+                "() => Array.from(document.querySelectorAll('input,textarea,select'))"
+                ".map(e => ({n: e.labels?.[0]?.innerText || e.getAttribute('aria-label')"
+                " || e.name || e.placeholder || e.id || '', v: e.value || ''}))"
+                ".filter(f => f.n)"
+            )
+        except Exception:
+            return ""
+        if not vals:
+            return ""
+        lines = [f"  {f['n']}: {f['v'] if f['v'] else '(empty)'}" for f in vals]
+        return "\nCurrent field values (do NOT re-fill non-empty ones):\n" + "\n".join(lines)
 
-    snapshot = _snap() if not aria else f"Current URL: {current_url}\nAccessibility tree:\n{aria}"
+    def _snap() -> str:
+        return (f"Current URL: {page.url}\nAccessibility tree:\n"
+                f"{page.locator('body').aria_snapshot()}{_field_values()}")
+
+    snapshot = _snap() if not aria else f"Current URL: {current_url}\nAccessibility tree:\n{aria}{_field_values()}"
     history: list = []
+    uploaded: set = set()  # file-input keys already handled (URL#index)
+    last_code = ""    # last exec code — detect a model looping the same action
+    repeat = 0        # consecutive identical actions
 
     for turn in range(max_turns):
         current_url = page.url
@@ -329,13 +399,42 @@ def run_agent(
         stuck = url_counts[current_url] >= stuck_limit
         hints_text = ", ".join(f"{k}={v}" for k, v in hints.items()) if hints else "none"
 
+        # Deterministic document upload — the LLM can't author a file, so clear any
+        # pending file <input> before it gets stuck, then re-observe and continue.
+        up = _handle_pending_upload(page, uploaded, artifact_dir)
+        if up:
+            if on_say:
+                on_say("Let me upload my document here.")
+            shot = None
+            if artifact_dir:
+                d = _pl.Path(artifact_dir)
+                d.mkdir(parents=True, exist_ok=True)
+                shot = str(d / f"step_{idx}.png")
+                try:
+                    page.screenshot(path=shot)
+                except Exception:
+                    shot = None
+            step = StepSignals(
+                step_idx=idx, step_key="upload document", critical=True,
+                dwell_s=0, retries=0, dead_end=False, completed=True,
+                llm_confusion=0, reading_grade=grade, say="Let me upload my document here.",
+            )
+            steps.append(step)
+            if shot:
+                shots.append(shot)
+            idx += 1
+            snapshot = f"Result: {up}\n\n{_snap()}"
+            continue
+
         turn_msgs = [SystemMessage(content=_MCP_SYSTEM)]
         for h in history:
             turn_msgs.append(HumanMessage(content=h["user"]))
             if h.get("assistant"):
                 turn_msgs.append(SystemMessage(content=h["assistant"]))
 
+        persona_line = f"PERSONA (speak in this voice for 'say'): {persona_voice}\n" if persona_voice else ""
         user_msg = (
+            persona_line +
             f"GOAL: {goal}\n"
             f"Success URL pattern: {success_url or '(none)'}\n"
             f"Success element: {success_element or '(none — look for matching text in a11y tree)'}\n"
@@ -376,6 +475,11 @@ def run_agent(
 
         step_label = payload.get("step_label", f"turn_{turn}")
         confusion = float(payload.get("confusion", 0))
+        say = payload.get("say", "")
+        # Emit the persona's line LIVE — run_agent returns all steps at once, so without
+        # this the monologue would only surface when the whole persona loop finishes.
+        if on_say and say:
+            on_say(say)
 
         # --- done (dual gate: URL or element) -------------------------------
         if payload.get("done"):
@@ -394,7 +498,7 @@ def run_agent(
             step = StepSignals(
                 step_idx=idx, step_key=step_label, critical=False,
                 dwell_s=0, retries=0, dead_end=False, completed=True,
-                llm_confusion=confusion, reading_grade=grade,
+                llm_confusion=confusion, reading_grade=grade, say=say,
             )
             steps.append(step)
             return {
@@ -423,7 +527,7 @@ def run_agent(
             step = StepSignals(
                 step_idx=idx, step_key=step_label, critical=False,
                 dwell_s=0, retries=0, dead_end=True, completed=False,
-                llm_confusion=confusion, reading_grade=grade,
+                llm_confusion=confusion, reading_grade=grade, say=say,
             )
             steps.append(step)
             return {
@@ -466,6 +570,25 @@ def run_agent(
             }
         else:
             result_msg = _play_exec(page, code)
+            # Loop-breaker: a weak model re-runs the same action forever because the a11y
+            # tree looks unchanged. Escalate the nudge the more it repeats.
+            if code.strip() == last_code:
+                repeat += 1
+                if repeat >= 3:
+                    result_msg += (
+                        "\n\nSTOP. You have run this SAME action several times with no effect. "
+                        "A click that doesn't advance means a REQUIRED FIELD above the button is "
+                        "still empty or invalid — read the screen (incl. any on-screen code/hint), "
+                        "FILL that field, THEN click. Do something DIFFERENT now."
+                    )
+                else:
+                    result_msg += (
+                        "\n\nNOTE: You just ran this EXACT action again and nothing changed — "
+                        "it is already done. Do NOT repeat it; fill remaining fields or click the next button."
+                    )
+            else:
+                repeat = 0
+            last_code = code.strip()
 
         # Screenshot
         shot = None
@@ -482,7 +605,7 @@ def run_agent(
         step = StepSignals(
             step_idx=idx, step_key=step_label, critical=False,
             dwell_s=0, retries=0, dead_end=dead_end, completed=not dead_end,
-            llm_confusion=confusion, reading_grade=grade,
+            llm_confusion=confusion, reading_grade=grade, say=say,
             wcag=wcag if idx == 0 else (),
         )
         steps.append(step)
