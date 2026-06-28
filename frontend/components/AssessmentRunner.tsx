@@ -813,7 +813,9 @@ function ReplayCard({
               <img
                 src={src}
                 alt={`${cur.step_key} as ${persona} saw it`}
-                className="h-[320px] w-full object-cover object-top"
+                loading="lazy"
+                decoding="async"
+                className="h-auto max-h-[70vh] w-full object-contain"
                 style={{ filter: filter || undefined }}
               />
             ) : (
