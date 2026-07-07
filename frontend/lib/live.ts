@@ -70,6 +70,9 @@ export interface Pack {
   remediation: { criterion: string; issue: string; owner: string; severity: string | null }[];
   replay: Record<string, ReplayClip>;
   synthesis?: { rollup: string; narrative: string; key_exclusions: string[] };
+  // Persisted event journey (frames excluded) — replayed on the historical detail
+  // page through the same reducer so a revisited run matches the live finish screen.
+  journey?: StreamEvent[];
 }
 
 export interface RunResponse {

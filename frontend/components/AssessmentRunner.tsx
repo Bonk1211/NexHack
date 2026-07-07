@@ -557,6 +557,10 @@ function PersonaColumn({
   const monologue = items
     .filter((it) => it.monologue)
     .map((it) => ({ id: it.id, text: it.monologue as string }));
+  // Live runs stream a video frame; a replayed historical run has none, so fall
+  // back to the latest captured step screenshot for the phone frame.
+  const lastShot = [...items].reverse().find((it) => it.screenshot_url)?.screenshot_url;
+  const lastShotUrl = frame ? null : mediaUrl(lastShot ?? null);
 
   return (
     <div className="rounded-card bg-card p-3">
@@ -584,6 +588,13 @@ function PersonaColumn({
               <img
                 src={`data:image/jpeg;base64,${frame}`}
                 alt={`${displayName} live browser`}
+                className="block w-full"
+              />
+            ) : lastShotUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={lastShotUrl}
+                alt={`${displayName} last captured screen`}
                 className="block w-full"
               />
             ) : (

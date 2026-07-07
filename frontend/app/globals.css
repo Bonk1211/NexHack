@@ -18,11 +18,15 @@
   --color-on-dark-dim: #a1a1a6;
 
   /* One interactive accent */
-  --color-brand: #0066cc;
+  --color-brand: #d97a2b;
 
   /* Warm accent (score ring, CTA buttons) */
   --color-accent: #d97a2b;
   --color-accent-dark: #b8631f;
+
+  /* Bench Signal hero vibe: workshop walnut + wayfinding signal blue-grey */
+  --color-workshop: #2a2420;
+  --color-signal: #5b7480;
 
   /* Semantic (desaturated) */
   --color-ok: #1d8a4e;
@@ -163,6 +167,41 @@ body {
   animation: pulse-soft 1.6s ease-in-out infinite;
 }
 
+/* ── Bench Signal hero: mascot breathes like a shelf display ── */
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+.mascot-float {
+  animation: float 4s ease-in-out infinite;
+}
+
+/* ── Bench Signal hero: signage rail draws in once, like a transit sign
+   powering on ── */
+@keyframes beam-sweep {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.signage-rail {
+  transform-origin: left;
+  animation: beam-sweep 900ms cubic-bezier(0.16, 1, 0.3, 1) 200ms both;
+}
+
+/* ── Bench Signal hero: pegboard dot-grid behind the mascot ── */
+.pegboard {
+  background-image: radial-gradient(rgba(245, 245, 247, 0.14) 1.5px, transparent 1.5px);
+  background-size: 22px 22px;
+}
+
 /* ── Honor prefers-reduced-motion: kill transforms + animation ── */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -180,6 +219,13 @@ body {
   }
   .pulse-soft {
     animation: none !important;
+  }
+  .mascot-float {
+    animation: none !important;
+  }
+  .signage-rail {
+    animation: none !important;
+    transform: none !important;
   }
 }
 

@@ -99,7 +99,7 @@ export default function LiveRunPage() {
     <div className="min-h-screen bg-field">
       <div className="flex items-center justify-between border-b border-hairline px-10 py-4">
         <div className="flex items-center gap-2 text-[13px] text-secondary">
-          <Link href="/" className="text-brand no-underline hover:underline">Home</Link>
+          <Link href="/projects" className="text-brand no-underline hover:underline">Projects</Link>
           <span>/</span>
           <Link href={`/projects/${projectId}`} className="text-brand no-underline hover:underline">Project</Link>
           <span>/</span>

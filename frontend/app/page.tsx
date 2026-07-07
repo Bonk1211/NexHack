@@ -1,335 +1,327 @@
-"use client";
-
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getProjects, createProject, createRepo } from "@/lib/api";
-import type { Project, Viewport } from "@/lib/types";
-import { relativeTime, scorePct } from "@/lib/format";
 import { ScoreRing } from "@/components/ScoreRing";
-import { PhonePreview } from "@/components/PhonePreview";
+import { FrictionMatrix } from "@/components/FrictionMatrix";
+import { Reveal } from "@/components/Reveal";
+import type { FrictionMatrix as FrictionMatrixData } from "@/lib/types";
 
 export default function Home() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showNew, setShowNew] = useState(false);
-
-  useEffect(() => {
-    getProjects().then((p) => {
-      setProjects(p);
-      setLoading(false);
-    });
-  }, []);
-
   return (
     <div>
-      <div className="bg-anchor px-10 pt-16 pb-14">
-        <div className="rise">
-          <h1 className="font-display text-[40px] leading-tight text-on-dark">
-            Audit every user. Before they leave.
-          </h1>
-          <p className="mt-2 max-w-lg text-[15px] text-on-dark-dim">
-            Persona-driven accessibility audits that show who gets blocked — and exactly why.
-          </p>
-          <button
-            type="button"
-            onClick={() => setShowNew(true)}
-            className="mt-6 rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
-          >
-            New project
-          </button>
-        </div>
-      </div>
-
-      <div className="px-10 py-10">
-        {loading ? (
-          <div className="grid grid-cols-2 gap-5">
-            {[0, 1].map((i) => (
-              <div key={i} className="card h-[260px] shimmer" />
-            ))}
-          </div>
-        ) : projects.length === 0 ? (
-          <EmptyState onNew={() => setShowNew(true)} />
-        ) : (
-          <div className="grid grid-cols-2 gap-5">
-            {projects.map((p, i) => (
-              <div key={p.id} className="rise" style={{ animationDelay: `${i * 30}ms` }}>
-                <ProjectCard project={p} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {showNew && (
-        <NewProjectSlideOver
-          onClose={() => setShowNew(false)}
-          onCreated={(p) => {
-            setProjects((prev) => [...prev, p]);
-            setShowNew(false);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function healthBadge(score: number): { label: string; className: string } {
-  if (score >= 0.75) return { label: "Passing", className: "bg-tint-ok text-ok" };
-  if (score >= 0.45) return { label: "Needs work", className: "bg-tint-friction text-friction" };
-  return { label: "Critical", className: "bg-tint-blocked text-blocked" };
-}
-
-function PersonaDots({ count }: { count: number }) {
-  const show = Math.min(count, 6);
-  const overflow = count - show;
-  return (
-    <div className="flex items-center gap-1">
-      {Array.from({ length: show }).map((_, i) => (
-        <span
-          key={i}
-          className="h-2 w-2 rounded-full bg-accent opacity-80"
-          style={{ opacity: 0.5 + (i / Math.max(show - 1, 1)) * 0.5 }}
-        />
-      ))}
-      {overflow > 0 && (
-        <span className="ml-0.5 text-[11px] text-tertiary">+{overflow}</span>
-      )}
-      <span className="ml-1.5 text-[12px] text-secondary">
-        {count} persona{count !== 1 ? "s" : ""}
-      </span>
-    </div>
-  );
-}
-
-function ProjectCard({ project }: { project: Project }) {
-  const badge = project.latestScore != null ? healthBadge(project.latestScore) : null;
-
-  return (
-    <div className="card group flex gap-4 p-5">
-      <PhonePreview url={project.stagingUrl} compact />
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top: name + score ring with badge beneath */}
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <Link
-              href={`/projects/${project.id}`}
-              className="block truncate font-display text-[20px] text-primary no-underline hover:underline"
-            >
-              {project.name}
-            </Link>
-            {project.description && (
-              <p className="mt-0.5 line-clamp-1 text-[12px] text-tertiary italic">
-                {project.description}
-              </p>
-            )}
-            <div className="mt-2">
-              <PersonaDots count={project.personaCount} />
-            </div>
-          </div>
-          {project.latestScore != null && (
-            <div className="flex shrink-0 flex-col items-center gap-1.5">
-              <ScoreRing value={project.latestScore} size={52} />
-              {badge && (
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.className}`}>
-                  {badge.label}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Bottom: links + timestamp */}
-        <div className="mt-auto pt-4">
-          <div className="flex flex-wrap gap-1.5">
-            {project.repoUrl && (
-              <a
-                href={project.repoUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
-              >
-                <svg className="h-3.5 w-3.5 shrink-0" fill="currentColor" viewBox="0 0 16 16">
-                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-                </svg>
-                Repo
-              </a>
-            )}
-            {project.stagingUrl && (
-              <a
-                href={project.stagingUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 rounded-lg bg-field px-2.5 py-1.5 text-[12px] text-secondary no-underline transition-colors hover:text-primary"
-              >
-                <svg className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                </svg>
-                Live
-              </a>
-            )}
-          </div>
-          <p className="mt-3 text-[12px] text-tertiary">{relativeTime(project.lastRunAt)}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({ onNew }: { onNew: () => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-24">
-      <div className="card p-10 text-center">
-        <div className="font-display text-[24px] text-primary">No projects yet</div>
-        <p className="mt-2 text-[14px] text-secondary">
-          Create your first project to start auditing your onboarding flows.
-        </p>
-        <button
-          type="button"
-          onClick={onNew}
-          className="mt-5 rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
-        >
-          Create project
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function NewProjectSlideOver({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (p: Project) => void;
-}) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [repoName, setRepoName] = useState("");
-  const [stagingUrl, setStagingUrl] = useState("");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [viewport, setViewport] = useState<Viewport>("desktop");
-  const [saving, setSaving] = useState(false);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setSaving(true);
-    const p = await createProject({
-      name: name.trim(),
-      description: description.trim() || undefined,
-      repoUrl: repoUrl.trim() || undefined,
-      stagingUrl: stagingUrl.trim() || undefined,
-    });
-    if (repoName.trim() && stagingUrl.trim()) {
-      await createRepo(p.id, {
-        name: repoName.trim(),
-        stagingUrl: stagingUrl.trim(),
-        repoUrl: repoUrl.trim() || undefined,
-        viewport,
-      });
-    }
-    onCreated(p);
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="h-full w-[420px] overflow-y-auto bg-card p-8 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+        className="px-10 pt-16 pb-14"
+        style={{ background: "linear-gradient(135deg, var(--color-anchor) 0%, var(--color-workshop) 100%)" }}
       >
-        <div className="flex items-center justify-between">
-          <h2 className="font-display text-[24px] text-primary">New project</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[14px] text-secondary hover:text-primary"
-          >
-            Close
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="mt-8 space-y-5">
-          <Field label="Project name">
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="input"
-              placeholder="MyDigital ID Onboarding"
-              required
-            />
-          </Field>
-          <Field label="Description">
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="input min-h-[80px]"
-              placeholder="National e-ID sign-up flow"
-            />
-          </Field>
-
-          <div className="border-t border-hairline pt-5">
-            <div className="section-label mb-4">First repo</div>
-            <Field label="Repo name">
-              <input
-                type="text"
-                value={repoName}
-                onChange={(e) => setRepoName(e.target.value)}
-                className="input"
-                placeholder="mydigital-web (staging)"
-              />
-            </Field>
-            <Field label="Repository URL">
-              <input
-                type="url"
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                className="input"
-                placeholder="https://github.com/org/repo"
-              />
-            </Field>
-            <Field label="Staging URL">
-              <input
-                type="url"
-                value={stagingUrl}
-                onChange={(e) => setStagingUrl(e.target.value)}
-                className="input"
-                placeholder="https://staging.example.com"
-              />
-            </Field>
-            <Field label="Viewport">
-              <select
-                value={viewport}
-                onChange={(e) => setViewport(e.target.value as Viewport)}
-                className="input"
-              >
-                <option value="desktop">Desktop</option>
-                <option value="tablet">Tablet</option>
-                <option value="mobile">Mobile</option>
-              </select>
-            </Field>
+        <div className="grid gap-10 sm:grid-cols-[1.1fr_0.9fr] sm:items-center">
+          <div className="rise">
+            <span className="section-label text-on-dark-dim">InclusionScope</span>
+            <h1 className="mt-3 font-display text-[40px] leading-tight text-on-dark">
+              Accessibility audits that show exactly who gets blocked — and why.
+            </h1>
+            <div className="signage-rail mt-4 h-[2px] w-16 bg-accent" />
+            <p className="mt-4 max-w-md text-[15px] leading-relaxed text-on-dark-dim">
+              Real personas run your live app end-to-end, cross-checked against
+              axe-core&apos;s WCAG engine — every finding is either machine-verified or
+              clearly labeled as a signal, never guessed.
+            </p>
+            <Link
+              href="/projects"
+              className="mt-7 inline-block rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white no-underline transition-opacity hover:opacity-90"
+            >
+              Show me who&apos;s blocked
+            </Link>
           </div>
 
-          <button
-            type="submit"
-            disabled={saving || !name.trim()}
-            className="w-full rounded-xl bg-accent py-3 text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
-            {saving ? "Creating..." : "Create project"}
-          </button>
-        </form>
+          <div className="pegboard flex h-[280px] items-center justify-center sm:h-[320px]">
+            <div className="mascot-float h-[220px] w-[220px] overflow-hidden rounded-full shadow-2xl sm:h-[260px] sm:w-[260px]">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/mascot-hero.png"
+                alt="InclusionScope mascot holding a glowing accessibility check"
+                className="h-full w-full object-cover"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <PainInsight />
+      <ProductProof />
+      <ValueStrip />
+      <HowItWorks />
+      <ClosingCTA />
+      <SiteFooter />
+    </div>
+  );
+}
+
+// Pain → stakes: the user's blocked moment, paired with what it costs the SaaS
+// owner who can't see it in their own analytics. Numbers are the actual persona
+// thresholds this product runs with (personas/elderly_low_literacy.json,
+// personas/oku_visual.json) — not invented stats.
+function PainInsight() {
+  return (
+    <div className="border-b border-hairline bg-card px-5 py-12 sm:px-10">
+      <span className="section-label">Who gets left behind</span>
+      <div className="mt-5 grid gap-8 sm:grid-cols-2">
+        <Reveal className="border-l-2 border-blocked pl-5">
+          <h2 className="font-display text-[22px] leading-snug text-primary">
+            She&apos;s 68. The OTP timer runs out before she finishes reading it.
+          </h2>
+          <p className="mt-2 text-[14px] leading-relaxed text-secondary">
+            Our elderly persona reads at 120 words a minute and gives up after 30
+            seconds of ambiguity. Our low-vision persona can&apos;t move past a field
+            without AA contrast and a real focus order. These aren&apos;t edge cases —
+            they&apos;re two of the users your app already has.
+          </p>
+          <p className="mt-3 text-[12px] text-tertiary">
+            elderly_low_literacy · oku_visual — real persona thresholds, not guesses
+          </p>
+        </Reveal>
+        <Reveal delayMs={40} className="border-l-2 border-accent pl-5">
+          <h2 className="font-display text-[22px] leading-snug text-primary">
+            Your funnel shows a drop-off. It doesn&apos;t show why.
+          </h2>
+          <p className="mt-2 text-[14px] leading-relaxed text-secondary">
+            A blocked OKU or senior user doesn&apos;t file a ticket — they close the
+            tab. Standard analytics can&apos;t tell you if that was a contrast
+            failure, a missing label, or a timer that was never built for them. As
+            accessibility expectations tighten for consumer and government-facing
+            apps, &quot;we didn&apos;t know&quot; stops being a defense.
+          </p>
+        </Reveal>
       </div>
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+// ── Sample data for the "See the report" section ──────────────────────────
+// Illustrative only — this is what a run's output looks like, not a claim
+// about the visitor's own app (hence the "Sample output" tag below). Persona
+// names and disability labels match the real fixtures this product ships
+// with (lib/fixtures.ts: p-siti = elderly/first-time digital, p-mei = OKU
+// low-vision, p-david = power user) so the shape is representative of an
+// actual run, just condensed to a 4-step flow for the page.
+const SAMPLE_STEPS = ["landing", "otp", "submit", "success"];
+const SAMPLE_PERSONA_NAMES: Record<string, string> = {
+  "p-siti": "Siti Nurhaliza",
+  "p-mei": "Aunty Mei",
+  "p-david": "David Lim",
+};
+const SAMPLE_SCORE = 0.61;
+const SAMPLE_MATRIX: FrictionMatrixData = {
+  steps: SAMPLE_STEPS,
+  rows: [
+    {
+      personaId: "p-siti",
+      cells: [
+        { stepName: "landing", status: "ok", dwellMs: 3200 },
+        { stepName: "otp", status: "blocked", dwellMs: null },
+        { stepName: "submit", status: "blocked", dwellMs: null },
+        { stepName: "success", status: "blocked", dwellMs: null },
+      ],
+    },
+    {
+      personaId: "p-mei",
+      cells: [
+        { stepName: "landing", status: "ok", dwellMs: 4100 },
+        { stepName: "otp", status: "friction", dwellMs: 15200 },
+        { stepName: "submit", status: "friction", dwellMs: 21800 },
+        { stepName: "success", status: "ok", dwellMs: 3600 },
+      ],
+    },
+    {
+      personaId: "p-david",
+      cells: [
+        { stepName: "landing", status: "ok", dwellMs: 1800 },
+        { stepName: "otp", status: "ok", dwellMs: 2600 },
+        { stepName: "submit", status: "ok", dwellMs: 2200 },
+        { stepName: "success", status: "ok", dwellMs: 1500 },
+      ],
+    },
+  ],
+};
+
+function ProductProof() {
   return (
-    <div>
-      <label className="mb-1.5 block text-[12px] font-semibold uppercase tracking-[0.06em] text-tertiary">
-        {label}
-      </label>
-      {children}
+    <div className="border-b border-hairline bg-field px-5 py-14 sm:px-10">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="section-label">See the report</span>
+        <span className="rounded-full bg-card px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary shadow-sm">
+          Sample output
+        </span>
+      </div>
+      <h2 className="mt-4 max-w-xl font-display text-[26px] leading-snug text-primary">
+        Every run ends here: a score, and a map of exactly who got stuck.
+      </h2>
+      <p className="mt-2 max-w-xl text-[14px] leading-relaxed text-secondary">
+        Below is a sample run, not your data — three personas through a
+        four-step sign-up flow. Your first real run will look like this,
+        built from your own staging URL.
+      </p>
+
+      <Reveal className="card mt-8 flex flex-col items-center gap-5 p-6 text-center sm:flex-row sm:justify-between sm:p-8 sm:text-left">
+        <div>
+          <span className="section-label">Inclusion score</span>
+          <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-secondary">
+            1 of 3 sample personas blocked outright — a first-time digital
+            user stuck at the OTP step before she can even reach the form.
+          </p>
+        </div>
+        <ScoreRing value={SAMPLE_SCORE} size={128} />
+      </Reveal>
+
+      <Reveal delayMs={80}>
+        <FrictionMatrix matrix={SAMPLE_MATRIX} personaNames={SAMPLE_PERSONA_NAMES} />
+      </Reveal>
+
+      <p className="mt-6 text-[12px] text-tertiary">
+        Real personas · axe-core WCAG 2.2 · zero manual scripting
+      </p>
     </div>
+  );
+}
+
+// Slim value strip below the hero — one line each addressing the top three
+// buying objections (skepticism about live-run coverage, AI-judged
+// compliance, and per-site setup effort).
+function ValueStrip() {
+  const items: { icon: React.ReactNode; text: string }[] = [
+    {
+      icon: (
+        <>
+          <circle cx="12" cy="12" r="9" strokeWidth={2} />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9l5 3-5 3V9z" />
+        </>
+      ),
+      text: "Not a checklist — live personas run your real flow end to end.",
+    },
+    {
+      icon: (
+        <>
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"
+          />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4" />
+        </>
+      ),
+      text: "axe-core WCAG checks stay separate from AI judgment — never guessed.",
+    },
+    {
+      icon: (
+        <>
+          <circle cx="12" cy="12" r="9" strokeWidth={2} />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M3 12h18M12 3c2.5 2.5 2.5 15.5 0 18M12 3c-2.5 2.5-2.5 15.5 0 18"
+          />
+        </>
+      ),
+      text: "Point at any staging URL — the agent adapts itself, no scripting.",
+    },
+  ];
+
+  return (
+    <div className="border-b border-hairline bg-card px-5 py-14 sm:px-10">
+      <span className="section-label">Why it holds up</span>
+      <div className="mt-6 grid gap-6 sm:grid-cols-3">
+        {items.map((item, i) => (
+          <Reveal key={i} delayMs={i * 40} className="card relative overflow-hidden p-6">
+            <div className="absolute inset-x-0 top-0 h-[3px] bg-signal" />
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-signal/10 text-signal">
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {item.icon}
+              </svg>
+            </span>
+            <p className="mt-4 text-[14px] leading-relaxed text-secondary">{item.text}</p>
+          </Reveal>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HowItWorks() {
+  const steps = [
+    {
+      n: "01",
+      title: "Point at any staging URL.",
+      body: "No scripting, no test IDs to wire up first. Give it a URL and a goal — the agent figures out the rest.",
+    },
+    {
+      n: "02",
+      title: "Real personas run the flow, live.",
+      body: "Each persona moves through your app at its own pace, cross-checked against axe-core's WCAG engine as it goes.",
+    },
+    {
+      n: "03",
+      title: "Get the friction map.",
+      body: "An inclusion score, plus a step-by-step breakdown of exactly who got blocked — and why.",
+    },
+  ];
+
+  return (
+    <div className="border-b border-hairline bg-field px-5 py-14 sm:px-10">
+      <span className="section-label">How it works</span>
+      <div className="mt-6 grid gap-6 sm:grid-cols-3">
+        {steps.map((s, i) => (
+          <Reveal key={s.n} delayMs={i * 60} className="card p-6">
+            <div className="font-display text-[34px] leading-none text-accent">{s.n}</div>
+            <h3 className="mt-3 font-display text-[19px] leading-snug text-primary">{s.title}</h3>
+            <p className="mt-2 text-[14px] leading-relaxed text-secondary">{s.body}</p>
+          </Reveal>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Closing CTA — deliberately mirrors the hero's headline and button copy so
+// the page reads as one closed loop, not three unrelated pitches.
+function ClosingCTA() {
+  return (
+    <div
+      className="px-5 py-16 text-center sm:px-10"
+      style={{ background: "linear-gradient(135deg, var(--color-anchor) 0%, var(--color-workshop) 100%)" }}
+    >
+      <Reveal className="mx-auto max-w-2xl">
+        <span className="section-label text-on-dark-dim">InclusionScope</span>
+        <h2 className="mt-3 font-display text-[32px] leading-tight text-on-dark">
+          Accessibility audits that show exactly who gets blocked — and why.
+        </h2>
+        <div className="signage-rail mx-auto mt-4 h-[2px] w-16 bg-accent" />
+        <Link
+          href="/projects"
+          className="mt-7 inline-block rounded-xl bg-accent px-5 py-2.5 text-[14px] font-medium text-white no-underline transition-opacity hover:opacity-90"
+        >
+          Show me who&apos;s blocked
+        </Link>
+      </Reveal>
+    </div>
+  );
+}
+
+function SiteFooter() {
+  return (
+    <footer className="bg-field px-5 py-8 sm:px-10">
+      <div className="flex flex-col items-center gap-4 text-center sm:flex-row sm:justify-between sm:text-left">
+        <nav className="flex gap-5 text-[13px] text-secondary">
+          <Link href="/" className="hover:text-primary">
+            Home
+          </Link>
+          <Link href="/projects" className="hover:text-primary">
+            Projects
+          </Link>
+          <Link href="/personas" className="hover:text-primary">
+            Personas
+          </Link>
+        </nav>
+        <p className="text-[12px] text-tertiary">InclusionScope — NexHack 2026</p>
+      </div>
+    </footer>
   );
 }

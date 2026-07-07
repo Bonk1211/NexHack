@@ -70,7 +70,7 @@ export default function ProjectDetailPage() {
   const [showFlowEditor, setShowFlowEditor] = useState(false);
   const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
-  const [runMode, setRunMode] = useState<RunMode>("sequential");
+  const runMode: RunMode = "sequential";
   const [showRunner, setShowRunner] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [showPersonaModal, setShowPersonaModal] = useState(false);
@@ -143,33 +143,13 @@ export default function ProjectDetailPage() {
     <div>
       <div className="flex items-center justify-between border-b border-hairline px-10 py-4">
         <div className="flex items-center gap-2 text-[13px] text-secondary">
-          <Link href="/" className="text-brand no-underline hover:underline">
-            Home
+          <Link href="/projects" className="text-brand no-underline hover:underline">
+            Projects
           </Link>
           <span>/</span>
           <span className="text-primary">{project.name}</span>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-lg bg-field p-1">
-            <button
-              type="button"
-              onClick={() => setRunMode("sequential")}
-              className={`rounded-md px-3 py-1 text-[12px] font-medium transition-colors ${
-                runMode === "sequential" ? "bg-card text-primary shadow-sm" : "text-secondary"
-              }`}
-            >
-              Sequential
-            </button>
-            <button
-              type="button"
-              onClick={() => setRunMode("parallel")}
-              className={`rounded-md px-3 py-1 text-[12px] font-medium transition-colors ${
-                runMode === "parallel" ? "bg-card text-primary shadow-sm" : "text-secondary"
-              }`}
-            >
-              Parallel
-            </button>
-          </div>
           <button
             type="button"
             onClick={handleStartRun}

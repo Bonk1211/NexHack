@@ -244,6 +244,12 @@ def persist_run(
                 }
             ).execute()
 
+    # Tuck the token/cost rollup into the pack blob so the historical detail page
+    # rehydrates the same Token-usage card the live finish screen showed (it's kept
+    # off the inclusion score — operational metadata only, §16).
+    if usage:
+        pack["usage"] = usage
+
     # evidence_packs (§17): the primary output artifact. Render JSON + PDF once and
     # upload both to Storage; the public URLs are persisted for download. Best-effort:
     # pdf_url/json_url stay None when Storage is unavailable.
