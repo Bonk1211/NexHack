@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { QuotaBadge } from "@/components/QuotaBadge";
 
 const NAV = [
   { href: "/", label: "Home" },
@@ -130,7 +131,7 @@ export function Sidebar() {
         </div>
 
         <div className="px-6 pb-6">
-          <span className="text-[11px] text-tertiary">v0.1.0</span>
+          <QuotaBadge compact />
         </div>
       </aside>
     </>

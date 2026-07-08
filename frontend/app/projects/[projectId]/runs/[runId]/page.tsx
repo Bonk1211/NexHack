@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { getRun, getPersonas } from "@/lib/api";
-import { getRunPack, type Pack, type UsageSummary } from "@/lib/live";
+import { getRunPack, type Pack } from "@/lib/live";
 import type { RunDetail } from "@/lib/types";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
@@ -12,7 +12,7 @@ import { FrictionMatrix } from "@/components/FrictionMatrix";
 import { RunLog } from "@/components/RunLog";
 import { Results, LiveView, reduce, type LiveState } from "@/components/AssessmentRunner";
 
-type LivePack = { pack: Pack; usage: UsageSummary | null };
+type LivePack = { pack: Pack };
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -78,7 +78,7 @@ export default function RunDetailPage() {
             <div className="mt-6 h-[400px] card shimmer" />
           </>
         ) : livePack ? (
-          <LiveRunView pack={livePack.pack} usage={livePack.usage} runId={runId} />
+          <LiveRunView pack={livePack.pack} runId={runId} />
         ) : run ? (
           <MockRunView run={run} personaNames={personaNames} runId={runId} />
         ) : (
@@ -95,11 +95,9 @@ export default function RunDetailPage() {
 // journey was persisted have no `journey` — they fall back to Results only.
 function LiveRunView({
   pack,
-  usage,
   runId,
 }: {
   pack: Pack;
-  usage: UsageSummary | null;
   runId: string;
 }) {
   const live = useMemo<LiveState | null>(() => {
@@ -130,7 +128,7 @@ function LiveRunView({
       {live && view === "live" ? (
         <LiveView live={live} />
       ) : (
-        <Results pack={pack} runId={runId} usage={usage} />
+        <Results pack={pack} runId={runId} />
       )}
     </>
   );

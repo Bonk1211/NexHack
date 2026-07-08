@@ -292,6 +292,16 @@ def list_runs(app_name: str | None = None) -> list[dict]:
     return response
 
 
+@router.get("/quota")
+def get_quota() -> dict:
+    """Customer-facing plan usage: {"used": <total runs>, "limit": <plan cap>}.
+
+    Registered before the `/{run_id}` catch-all below so "quota" is never matched
+    as a run_id.
+    """
+    return repository.get_quota()
+
+
 @router.post("")
 def start_run(req: StartRunRequest) -> dict:
     # run_id doubles as the run graph's checkpointer thread_id. A client may pass an
@@ -456,7 +466,18 @@ def stream_run(
                     emit({"type": "monologue", "persona": _name, "text": text})
 
                 steps, shots = [], []
+                final_status, final_blocked_at, final_closing = None, None, ""
                 for node, data in stream_persona(payload, on_frame=on_frame, on_say=on_say):
+                    if node in ("agent", "act"):
+                        # The run's own authoritative outcome (dual-gate goal detection
+                        # already knows whether the persona ultimately got through, even
+                        # if an earlier step recorded a transient dead_end it recovered
+                        # from) — score() needs this, not just the raw per-step signals,
+                        # or a recovered dead_end permanently marks the whole persona
+                        # "blocked" despite later reaching the real finish line.
+                        final_status = data.get("status", final_status)
+                        final_blocked_at = data.get("blocked_at", final_blocked_at)
+                        final_closing = data.get("closing") or final_closing
                     if node == "agent":
                         # MCP agent — emits multiple steps per graph node invocation.
                         agent_steps = data.get("steps") or []
@@ -504,7 +525,15 @@ def stream_run(
                                          "dead_end": step.dead_end, "completed": step.completed},
                               "screenshot_url": _to_served_url(shot)})
 
-                res = PersonaRunResult(name, tuple(steps), thresholds, score(steps, thresholds))
+                res = PersonaRunResult(
+                    name, tuple(steps), thresholds,
+                    score(
+                        steps, thresholds,
+                        final_status=final_status or "",
+                        final_blocked_at=final_blocked_at,
+                    ),
+                    closing=final_closing,
+                )
                 v = res.result.persona_verdict
                 emit({"type": "persona_done", "persona": name, "verdict": v.verdict,
                       "severity": v.severity, "blocked_at": v.blocked_at,

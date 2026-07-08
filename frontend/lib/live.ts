@@ -37,6 +37,8 @@ export interface ReplayClip {
 export interface PersonaStep {
   step_idx: number;
   step_key: string;
+  step_label?: string;
+  say?: string;           // persona's first-person line at this step
   dwell_s: number;
   completed: boolean;
   dead_end: boolean;
@@ -51,6 +53,7 @@ export interface PersonaResult {
   verdict: string;
   severity: string | null;
   blocked_at: string | null;
+  closing?: string;   // persona's final word — quit reason, or success feedback
   wcag_failures: string[];
   inclusion_score: number;
   steps?: PersonaStep[];
@@ -61,10 +64,26 @@ export interface MatrixCell {
   dwell_s: number | null;
 }
 
+export interface WcagNode {
+  target: string;           // CSS selector of the offending element
+  html: string;              // outer HTML snippet
+  failure_summary: string;   // axe's own explanation, incl. measured values
+}
+
+export interface WcagDetail {
+  criterion: string;
+  rule_id: string;      // axe rule id, e.g. "color-contrast"
+  description: string;  // axe's plain-English rule description — the real label
+  help_url: string;
+  owner: string;
+  nodes: WcagNode[];     // populated only when the criterion failed
+}
+
 export interface Pack {
   app: string;
   inclusion_score: number;
   wcag_conformance: Record<string, string>;
+  wcag_details?: Record<string, WcagDetail>;
   matrix: { steps: string[]; rows: Record<string, Record<string, MatrixCell>> };
   personas: PersonaResult[];
   remediation: { criterion: string; issue: string; owner: string; severity: string | null }[];
@@ -113,6 +132,18 @@ export interface RunHistoryItem {
 export async function listRuns(appName: string): Promise<RunHistoryItem[]> {
   const res = await fetch(`${BASE_URL}/runs?app_name=${encodeURIComponent(appName)}`);
   if (!res.ok) throw new Error(`GET /runs failed: ${res.status}`);
+  return res.json();
+}
+
+export interface Quota {
+  used: number;
+  limit: number;
+}
+
+/** Customer-facing plan usage — runs against the account's plan quota. */
+export async function getQuota(): Promise<Quota> {
+  const res = await fetch(`${BASE_URL}/runs/quota`);
+  if (!res.ok) throw new Error(`GET /runs/quota failed: ${res.status}`);
   return res.json();
 }
 

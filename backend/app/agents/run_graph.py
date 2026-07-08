@@ -119,6 +119,7 @@ def persona_node(payload: PersonaInput) -> dict:
         "status": final.get("status"),
         "blocked_at": final.get("blocked_at"),
         "blocked_url": final.get("blocked_url"),   # browser address where persona got stuck
+        "closing": final.get("closing", ""),
     }
     return {"persona_results": [raw]}
 
@@ -136,7 +137,12 @@ def score_node(state: RunState) -> dict:
             persona=raw["persona"],
             steps=tuple(raw["steps"]),
             thresholds=raw["thresholds"],
-            result=score(raw["steps"], raw["thresholds"]),
+            result=score(
+                raw["steps"], raw["thresholds"],
+                final_status=raw.get("status") or "",
+                final_blocked_at=raw.get("blocked_at"),
+            ),
+            closing=raw.get("closing", ""),
         )
         for raw in state["ordered"]
     ]

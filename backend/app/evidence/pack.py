@@ -55,6 +55,7 @@ class PersonaRunResult:
     steps: tuple[StepSignals, ...]
     thresholds: PersonaThresholds
     result: ScoreResult
+    closing: str = ""
 
 
 def route_owner(wcag_failures: list[str]) -> str:
@@ -81,10 +82,24 @@ def build_friction_matrix(runs: list[PersonaRunResult]) -> dict:
     rows = {}
     for r in runs:
         by_key = {s.step_key: s for s in r.steps}
+        last_idx = r.steps[-1].step_idx if r.steps else -1
         rows[r.persona] = {
             key: (
                 {
-                    "status": step_status(by_key[key], r.thresholds),
+                    # "red" means this is where the persona's journey actually ended —
+                    # only their chronologically LAST step can be that. A dead_end on
+                    # an earlier step that they then moved past (proven by a later step
+                    # existing at all, even under a different key — e.g. the recovery
+                    # attempt jumped straight to the next screen instead of retrying the
+                    # same one) is real friction, but not what stopped them; showing it
+                    # red reads as "blocked here" even on a row that plainly continues
+                    # to green afterward.
+                    "status": (
+                        "amber"
+                        if step_status(by_key[key], r.thresholds) == "red"
+                        and by_key[key].step_idx != last_idx
+                        else step_status(by_key[key], r.thresholds)
+                    ),
                     "dwell_s": by_key[key].dwell_s,
                 }
                 if key in by_key
@@ -115,6 +130,49 @@ def build_remediation(runs: list[PersonaRunResult]) -> list[dict]:
     return sorted(worst.values(), key=lambda x: _SEVERITY_RANK.get(x["severity"], 4))
 
 
+def build_wcag_details(runs: list[PersonaRunResult]) -> dict[str, dict]:
+    """Per-criterion detail (§10): axe's own rule description + help link for
+    every criterion seen, and every offending element for criteria that failed.
+
+    Built straight from the raw per-step WcagSignal objects, which the scorer
+    never flattens (it only reduces them to pass/fail for `wcag_conformance`) —
+    so "why did 1.4.3 fail, and on which element" survives all the way to the
+    report instead of being discarded at the criterion-number level.
+    """
+    details: dict[str, dict] = {}
+    for r in runs:
+        for step in r.steps:
+            for sig in step.wcag:
+                d = details.get(sig.criterion)
+                if d is None:
+                    d = {
+                        "criterion": sig.criterion,
+                        "rule_id": sig.rule_id,
+                        "description": sig.description,
+                        "help_url": sig.help_url,
+                        "owner": route_owner([sig.criterion]),
+                        "nodes": [],
+                    }
+                    details[sig.criterion] = d
+                if sig.passed:
+                    continue
+                # A failing occurrence always wins the description slot — it's
+                # the specific broken rule, not just any rule mapped to this SC.
+                d["rule_id"], d["description"], d["help_url"] = (
+                    sig.rule_id, sig.description, sig.help_url,
+                )
+                seen = {n["target"] for n in d["nodes"]}
+                for node in sig.nodes:
+                    if node.target and node.target not in seen:
+                        seen.add(node.target)
+                        d["nodes"].append({
+                            "target": node.target,
+                            "html": node.html,
+                            "failure_summary": node.failure_summary,
+                        })
+    return details
+
+
 def _step_detail(s: StepSignals) -> dict:
     """Per-step evidence row, two streams kept distinct (§16).
 
@@ -125,6 +183,8 @@ def _step_detail(s: StepSignals) -> dict:
     return {
         "step_idx": s.step_idx,
         "step_key": s.step_key,
+        "step_label": s.step_label or s.step_key,
+        "say": s.say,   # persona's first-person line at this step — the "real user" voice
         "critical": s.critical,
         "dwell_s": s.dwell_s,
         "retries": s.retries,
@@ -223,6 +283,7 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
             "verdict": r.result.persona_verdict.verdict,          # INDICATIVE
             "severity": r.result.persona_verdict.severity,
             "blocked_at": r.result.persona_verdict.blocked_at,
+            "closing": r.closing,   # persona's final word — quit reason, or success feedback
             "wcag_failures": [c for c, v in r.result.wcag_conformance.items() if v == "fail"],
             "behavioral_note": "indicative — persona-simulation signal",
             "inclusion_score": r.result.composite.inclusion_score,
@@ -239,6 +300,7 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
         "run_at": run_at,                       # ISO-8601, supplied by orchestrator
         "inclusion_score": inclusion_score,
         "wcag_conformance": conformance,        # TRUSTED, reportable on its own (§16)
+        "wcag_details": build_wcag_details(runs),  # rule text + offending elements per criterion
         "matrix": build_friction_matrix(runs),  # hero artifact (FR-3.3)
         "personas": personas,
         "remediation": build_remediation(runs),

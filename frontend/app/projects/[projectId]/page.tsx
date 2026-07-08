@@ -53,6 +53,7 @@ import { RunLog } from "@/components/RunLog";
 import { StatusDot } from "@/components/StatusDot";
 import { PhonePreview } from "@/components/PhonePreview";
 import { FlowEditor } from "@/components/FlowEditor";
+import { QuotaBadge } from "@/components/QuotaBadge";
 
 type Tab = "overview" | "dashboard" | "personas" | "runs";
 
@@ -155,7 +156,7 @@ export default function ProjectDetailPage() {
             onClick={handleStartRun}
             className="rounded-xl bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
           >
-            ▶ Run acceptance test
+            ▶ New scan
           </button>
         </div>
       </div>
@@ -1120,7 +1121,7 @@ function RunsTab({
       {showRunner && (
         <div className="mb-8">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-label">Acceptance test — live agent run</h2>
+            <h2 className="section-label">New accessibility scan</h2>
             <button
               type="button"
               onClick={onHide}
@@ -1137,45 +1138,49 @@ function RunsTab({
           />
         </div>
       )}
-      <h2 className="section-label">Run history</h2>
-      <div className="mt-5">
-        {runs.length === 0 ? (
-          <p className="py-8 text-center text-[14px] text-secondary">No runs yet.</p>
-        ) : (
-          <div className="space-y-2">
-            {runs.map((r, i) => (
-              <Link
-                key={r.id}
-                href={`/projects/${projectId}/runs/${r.id}`}
-                className="rise card flex items-center justify-between p-4 no-underline transition-all duration-200 hover:-translate-y-0.5"
-                style={{ animationDelay: `${i * 30}ms` }}
-              >
-                <div className="flex items-center gap-4">
-                  <div className="text-[14px] font-medium text-primary">{r.id}</div>
-                  <span className="rounded-full bg-field px-2.5 py-0.5 text-[11px] font-medium capitalize text-secondary">
-                    {r.mode}
-                  </span>
-                </div>
-                <div className="flex items-center gap-6">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] text-secondary">Score</span>
-                    <span className="text-[14px] font-semibold tabular-nums text-primary">
-                      {scorePct(r.overallScore)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] text-secondary">Blocked</span>
-                    <span className={`text-[14px] font-semibold tabular-nums ${r.blockedCount > 0 ? "text-blocked" : "text-ok"}`}>
-                      {r.blockedCount}
-                    </span>
-                  </div>
-                  <span className="text-[12px] text-tertiary">{relativeTime(r.createdAt)}</span>
-                </div>
-              </Link>
-            ))}
+      {!showRunner && (
+        <>
+          <h2 className="section-label">Run history</h2>
+          <div className="mt-5">
+            {runs.length === 0 ? (
+              <p className="py-8 text-center text-[14px] text-secondary">No runs yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {runs.map((r, i) => (
+                  <Link
+                    key={r.id}
+                    href={`/projects/${projectId}/runs/${r.id}`}
+                    className="rise card flex items-center justify-between p-4 no-underline transition-all duration-200 hover:-translate-y-0.5"
+                    style={{ animationDelay: `${i * 30}ms` }}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className="text-[14px] font-medium text-primary">{r.id}</div>
+                      <span className="rounded-full bg-field px-2.5 py-0.5 text-[11px] font-medium capitalize text-secondary">
+                        {r.mode}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-6">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[13px] text-secondary">Score</span>
+                        <span className="text-[14px] font-semibold tabular-nums text-primary">
+                          {scorePct(r.overallScore)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[13px] text-secondary">Blocked</span>
+                        <span className={`text-[14px] font-semibold tabular-nums ${r.blockedCount > 0 ? "text-blocked" : "text-ok"}`}>
+                          {r.blockedCount}
+                        </span>
+                      </div>
+                      <span className="text-[12px] text-tertiary">{relativeTime(r.createdAt)}</span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1191,17 +1196,6 @@ const SEV_CHIP: Record<string, string> = {
   P2: "bg-[#b25e00]/10 text-[#9a6a00]",
   P3: "bg-field text-secondary",
 };
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return `${n}`;
-}
-
-function fmtCost(n: number, currency: string, applied: boolean): string {
-  const v = currency === "USD" ? `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}` : `${n.toFixed(4)} ${currency}`;
-  return applied ? v : `${v} est.`;
-}
 
 function Delta({ curr, prev, pct = false }: { curr: number; prev?: number; pct?: boolean }) {
   if (prev == null) return null;
@@ -1324,7 +1318,7 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
     );
   }
 
-  const { trend, personaReliability, usageByModel, actions } = dashboard;
+  const { trend, personaReliability, actions } = dashboard;
   const last = trend[trend.length - 1];
   const prev = trend.length >= 2 ? trend[trend.length - 2] : undefined;
   const openP0 = actions.filter((a) => a.severity === "P0").length;
@@ -1338,7 +1332,7 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
   return (
     <div className="space-y-8">
       {/* Row A — KPI cards */}
-      <div className="grid grid-cols-5 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <KpiCard label="Avg inclusion score">
           <div className="flex items-end gap-2">
             <span className="font-display text-[34px] leading-none tabular-nums text-primary">
@@ -1361,12 +1355,6 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
           <span className={`font-display text-[34px] leading-none tabular-nums ${dashboard.avgBlockedPerRun > 0 ? "text-blocked" : "text-ok"}`}>
             {dashboard.avgBlockedPerRun.toFixed(1)}
           </span>
-        </KpiCard>
-
-        <KpiCard label="Avg cost per run">
-          <div className="font-display text-[28px] leading-none tabular-nums text-primary">
-            {fmtCost(dashboard.avgCostPerRun, dashboard.currency, dashboard.pricingApplied)}
-          </div>
         </KpiCard>
 
         <KpiCard label="Avg P0/P1 per run">
@@ -1397,35 +1385,21 @@ function DashboardTab({ dashboard, projectId }: { dashboard: ProjectDashboard | 
         </ChartCard>
       </div>
 
-      {/* Row C — cost efficiency */}
+      {/* Row C — plan usage */}
       <div className="grid grid-cols-2 gap-4">
-        <ChartCard title="Cost & tokens per run" hasData={multiRun}>
-          <LineChart values={trend.map((t) => t.cost)} color="#6b7280" min={0} max={Math.max(...trend.map((t) => t.cost), 0.0001)} format="currency" />
-        </ChartCard>
+        <QuotaBadge />
         <div className="card p-5">
-          <h3 className="text-[13px] font-semibold text-primary">Usage by model</h3>
-          <table className="mt-3 w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-tertiary">
-                <th className="pb-2 font-medium">Model</th>
-                <th className="pb-2 text-right font-medium">Prompt</th>
-                <th className="pb-2 text-right font-medium">Compl.</th>
-                <th className="pb-2 text-right font-medium">Total</th>
-                <th className="pb-2 text-right font-medium">Cost</th>
-              </tr>
-            </thead>
-            <tbody className="tabular-nums">
-              {usageByModel.map((m) => (
-                <tr key={m.model} className="border-t border-hairline">
-                  <td className="py-2 text-primary">{m.model}</td>
-                  <td className="py-2 text-right text-secondary">{fmtTokens(m.promptTokens)}</td>
-                  <td className="py-2 text-right text-secondary">{fmtTokens(m.completionTokens)}</td>
-                  <td className="py-2 text-right text-secondary">{fmtTokens(m.totalTokens)}</td>
-                  <td className="py-2 text-right text-secondary">{fmtCost(m.cost, dashboard.currency, m.pricingApplied)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <h3 className="text-[13px] font-semibold text-primary">Need more runs?</h3>
+          <p className="mt-2 text-[12px] leading-relaxed text-secondary">
+            Higher-tier plans include more monthly scans, additional personas, and
+            priority support for rolling out accessibility fixes across your team.
+          </p>
+          <button
+            type="button"
+            className="mt-4 rounded-lg bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
+          >
+            View plans
+          </button>
         </div>
       </div>
 

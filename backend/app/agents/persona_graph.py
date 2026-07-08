@@ -41,7 +41,7 @@ from app.agents.navigator import (
     NavConfig,
     _role_has_name,
 )
-from app.agents.signals import axe_to_wcag, reading_grade, run_axe
+from app.agents.signals import axe_to_wcag, paragraph_text, reading_grade, run_axe
 from app.agents.state import PersonaInput, PersonaState
 from app.scoring.engine import StepSignals
 from app.llm_usage import current_tracker, set_tracker
@@ -66,12 +66,13 @@ def observe(state: PersonaState) -> dict:
 
     aria = page.locator("body").aria_snapshot()
     out["aria"] = aria
-    if idx == 0:
-        # TRUSTED stream — page-level axe, persona-independent, on the entry step (§16).
-        out["wcag"] = axe_to_wcag(run_axe(page))
-        body_text = page.inner_text("body")
-        out["grade"] = reading_grade(body_text)
-        out["word_count"] = max(len(body_text.split()), 1)
+    # TRUSTED stream — axe runs on EVERY screen the persona reaches, not just page 1
+    # (§16/§10). A multi-page flow's contrast/label violations live on the OTP,
+    # personal-details, and submit screens just as much as the landing page.
+    out["wcag"] = axe_to_wcag(run_axe(page))
+    body_text = page.inner_text("body")
+    out["grade"] = reading_grade(paragraph_text(aria))
+    out["word_count"] = max(len(body_text.split()), 1)
 
     # Screenshot EVERY step (FR-1.3) — the screen comprehend judges + empathy replay.
     shot = None
@@ -267,7 +268,7 @@ def act(state: PersonaState) -> dict:
         step_idx=idx,
         step_key=step_key,
         critical=critical if not state.get("autonomous") else False,
-        wcag=state.get("wcag", ()) if idx == 0 else (),
+        wcag=state.get("wcag", ()),  # observe() now refreshes this every screen
         dwell_s=dwell,
         retries=retries,
         dead_end=dead_end,
