@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""          # Alibaba DashScope — figurine image generation
     figurine_bucket: str = "figurine"    # Supabase Storage bucket for figurine PNGs
 
+    cors_origins: list[str] = ["*"]
+
     run_seed: int = 1337
     wcag_version: str = "2.2"
     slack_webhook_url: str = ""

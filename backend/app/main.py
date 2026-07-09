@@ -12,10 +12,9 @@ from app.routes import personas, projects, runs
 
 app = FastAPI(title="InclusionScope", version="0.1.0")
 
-# Dev CORS: the Next.js frontend (localhost:3000) calls this API directly.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
