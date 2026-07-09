@@ -118,6 +118,68 @@ function pct(n: number) {
   return `${Math.round(n * 100)}%`;
 }
 
+// Real weighted breakdown behind the top-line inclusion score — averaged across
+// personas the same way the top-line score itself is (engine.py's score() computes
+// wcag/behavioral/llm per persona; build_pack averages inclusion_score the same way).
+function ScoreBreakdownCard({ personas }: { personas: PersonaResult[] }) {
+  const [open, setOpen] = useState(false);
+  const withBreakdown = personas.filter((p) => p.score_breakdown);
+  if (withBreakdown.length === 0) return null;
+
+  const avg = (pick: (b: NonNullable<PersonaResult["score_breakdown"]>) => number) =>
+    withBreakdown.reduce((sum, p) => sum + pick(p.score_breakdown!), 0) / withBreakdown.length;
+
+  const wcagScore = avg((b) => b.wcag_score);
+  const behavioralScore = avg((b) => b.behavioral_score);
+  const llmScore = avg((b) => b.llm_score);
+  const weights = withBreakdown[0].score_breakdown!.weights;
+
+  // Color by the score's own value, not by which row it's in — same 75%/45%
+  // thresholds as the project health badge (app/projects/page.tsx healthBadge()),
+  // so "greener is better" reads consistently everywhere in the app. A fixed
+  // per-category color would let a higher score render in a worse-looking color
+  // than a lower one, which fights the convention the rest of the UI teaches.
+  const barColor = (score: number) =>
+    score >= 0.75 ? "bg-ok" : score >= 0.45 ? "bg-friction" : "bg-blocked";
+
+  const rows = [
+    { label: "WCAG conformance", note: "trusted — axe-core", weight: weights.wcag, score: wcagScore },
+    { label: "Behavioral completion", note: "indicative — dwell, retries, dead ends", weight: weights.behavioral, score: behavioralScore },
+    { label: "AI confusion signal", note: "indicative — persona confusion score", weight: weights.llm, score: llmScore },
+  ];
+
+  return (
+    <div className="mt-3 border-t border-hairline pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-[12px] font-medium text-brand hover:underline"
+      >
+        {open ? "Hide" : "How is this score calculated?"}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2.5">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center gap-3">
+              <div className="w-40 shrink-0">
+                <div className="text-[12px] font-medium text-primary">{r.label}</div>
+                <div className="text-[11px] text-tertiary">{r.note} · {pct(r.weight)} weight</div>
+              </div>
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-field">
+                <div className={`h-full rounded-full ${barColor(r.score)}`} style={{ width: pct(r.score) }} />
+              </div>
+              <span className="w-9 shrink-0 text-right text-[12px] font-medium text-primary">{pct(r.score)}</span>
+            </div>
+          ))}
+          <p className="pt-1 text-[11px] leading-relaxed text-tertiary">
+            Inclusion score = ({pct(weights.wcag)} × WCAG) + ({pct(weights.behavioral)} × Behavioral) + ({pct(weights.llm)} × AI confusion) — averaged across {withBreakdown.length} persona{withBreakdown.length > 1 ? "s" : ""}. WCAG is weighted highest because it's the trusted, deterministic stream; the other two are indicative signals.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Live run state, accumulated from the SSE stream ──────────────────────
 // One card per executed node (graph-execution-cards), showing its OUTPUT.
 interface NodeCardItem {
@@ -885,6 +947,7 @@ export function Results({ pack, runId }: { pack: Pack; runId: string | null }) {
         {pack.synthesis?.narrative && (
           <p className="mt-1 text-[13px] text-secondary">{pack.synthesis.narrative}</p>
         )}
+        <ScoreBreakdownCard personas={pack.personas} />
       </div>
 
       {/* WCAG compliance — TRUSTED stream (axe-core), kept visibly separate from
@@ -919,22 +982,79 @@ export function Results({ pack, runId }: { pack: Pack; runId: string | null }) {
               </tr>
             </thead>
             <tbody>
-              {Object.entries(pack.matrix.rows).map(([persona, cells]) => (
-                <tr key={persona} className="border-t border-hairline">
-                  <td className="p-2 text-primary">{persona}</td>
-                  {pack.matrix.steps.map((s) => {
-                    const c = cells[s];
-                    return (
-                      <td key={s} className="p-2">
-                        <span className={`inline-flex items-center gap-1.5 ${STATUS_COLOR[c?.status ?? "na"]}`}>
-                          <span className={`h-2 w-2 rounded-full ${STATUS_DOT[c?.status ?? "na"]}`} />
-                          {c?.status ?? "na"}
-                        </span>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
+              {Object.entries(pack.matrix.rows).map(([persona, cells]) => {
+                const steps = pack.personas.find((p) => p.persona === persona)?.steps ?? [];
+                return (
+                  <tr key={persona} className="border-t border-hairline">
+                    <td className="p-2 text-primary">{persona}</td>
+                    {pack.matrix.steps.map((s) => {
+                      const c = cells[s];
+                      // Last-write-wins per step_key, matching build_friction_matrix() on the
+                      // backend — a retried step overwrites the earlier attempt's status, so the
+                      // tooltip must show the same attempt the cell's color was computed from.
+                      const matches = steps.filter((st) => st.step_key === s);
+                      const step = matches[matches.length - 1];
+                      return (
+                        <td key={s} className="p-2">
+                          <div className="group/cell relative inline-block">
+                            <span className={`inline-flex items-center gap-1.5 ${STATUS_COLOR[c?.status ?? "na"]}`}>
+                              <span className={`h-2 w-2 rounded-full ${STATUS_DOT[c?.status ?? "na"]}`} />
+                              {c?.status ?? "na"}
+                            </span>
+                            {step && (
+                              <div className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-64 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/cell:opacity-100">
+                                {/* Every raw signal that can drive this cell's color (engine.py's
+                                    _step_blocks — dead_end/incomplete/retries — and _has_friction —
+                                    dwell/confusion/reading grade). An amber cell can mean either "real
+                                    friction, never blocked" or "blocked here, recovered later" — those
+                                    are different stories, so both sets of signals are shown, not just
+                                    one guessed set. WCAG is deliberately separate: it's the trusted
+                                    stream (shown above) and never itself determines this color. */}
+                                <div className="space-y-1.5 text-[12px]">
+                                  {step.dead_end && (
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="text-tertiary">Dead end here</span>
+                                      <span className="text-blocked">yes{!step.completed ? "" : " (recovered)"}</span>
+                                    </div>
+                                  )}
+                                  {!!step.retries && (
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="text-tertiary">Retries</span>
+                                      <span className="text-primary">{step.retries}</span>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">Dwell</span>
+                                    <span className="text-primary">{step.dwell_s.toFixed(1)}s</span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">AI confusion</span>
+                                    <span className="text-primary">
+                                      {step.llm_judgment ? pct(step.llm_judgment.confusion) : "—"}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">Reading grade</span>
+                                    <span className="text-primary">
+                                      {step.reading_grade != null ? step.reading_grade.toFixed(1) : "—"}
+                                    </span>
+                                  </div>
+                                  {step.axe_violations.length > 0 && (
+                                    <div className="flex items-center justify-between gap-3 border-t border-hairline pt-1.5">
+                                      <span className="text-tertiary">WCAG (trusted, separate)</span>
+                                      <span className="text-blocked">{step.axe_violations.join(", ")}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

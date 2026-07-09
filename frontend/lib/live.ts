@@ -46,6 +46,15 @@ export interface PersonaStep {
   llm_judgment?: { confusion: number };
   wcag_conformance: Record<string, string>;
   axe_violations: string[];
+  reading_grade?: number | null;   // Flesch-Kincaid grade — one of the friction-matrix color drivers
+  retries?: number;                // >retry_limit is one of the block (red→amber) drivers
+}
+
+export interface ScoreBreakdown {
+  wcag_score: number;
+  behavioral_score: number;
+  llm_score: number;
+  weights: { wcag: number; behavioral: number; llm: number };
 }
 
 export interface PersonaResult {
@@ -56,6 +65,7 @@ export interface PersonaResult {
   closing?: string;   // persona's final word — quit reason, or success feedback
   wcag_failures: string[];
   inclusion_score: number;
+  score_breakdown?: ScoreBreakdown;   // real weighted components behind inclusion_score
   steps?: PersonaStep[];
 }
 

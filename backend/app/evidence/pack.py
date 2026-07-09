@@ -287,6 +287,18 @@ def build_pack(app: str, run_at: str, runs: list[PersonaRunResult]) -> dict:
             "wcag_failures": [c for c, v in r.result.wcag_conformance.items() if v == "fail"],
             "behavioral_note": "indicative — persona-simulation signal",
             "inclusion_score": r.result.composite.inclusion_score,
+            # Real weighted breakdown behind inclusion_score (§16) — same numbers the
+            # scorer already computes, just surfaced instead of collapsed to one float.
+            "score_breakdown": {
+                "wcag_score": r.result.composite.wcag_score,
+                "behavioral_score": r.result.composite.behavioral_score,
+                "llm_score": r.result.composite.llm_score,
+                "weights": {
+                    "wcag": r.result.composite.weights.wcag,
+                    "behavioral": r.result.composite.weights.behavioral,
+                    "llm": r.result.composite.weights.llm,
+                },
+            },
             "steps": [_step_detail(s) for s in r.steps],   # per-step trusted+indicative (§16)
         }
         for r in runs
