@@ -11,20 +11,25 @@ const NAV = [
   { href: "/personas", label: "Personas" },
 ];
 
-/* Small geometric mark (viewfinder + focus point) — stands in for a "scope"
-   without reaching for an icon library. Inherits color via currentColor. */
+/* Brand mark — scan ring + checkmark, same geometry as frontend/app/icon.svg and
+   the icon half of public/inclusionscope-logo.svg. Fixed brand colors, not
+   currentColor, since it's designed against the sidebar's dark background. */
 function ScopeMark() {
   return (
     <svg
-      width="18"
-      height="18"
-      viewBox="0 0 18 18"
+      width="20"
+      height="20"
+      viewBox="0 0 180 180"
       fill="none"
       aria-hidden="true"
-      className="shrink-0 text-accent"
+      className="shrink-0"
     >
-      <rect x="1" y="1" width="16" height="16" rx="4" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="9" cy="9" r="2.5" fill="currentColor" />
+      <circle cx="90" cy="90" r="64" fill="none" stroke="#d97a2b" strokeWidth="16"
+        strokeLinecap="round" strokeDasharray="330 72.2" transform="rotate(-38 90 90)" />
+      <circle cx="90" cy="90" r="64" fill="none" stroke="#2f8fe0" strokeWidth="16"
+        strokeLinecap="round" strokeDasharray="26 376.2" transform="rotate(242 90 90)" />
+      <path d="M 66 92 L 82 108 L 116 72" fill="none" stroke="#f5f5f7" strokeWidth="10"
+        strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
