@@ -568,6 +568,22 @@ def run_agent(
     max_turns = 20
     stuck_limit = 20
 
+    # Modeled reading dwell (§23) — behavior_profile/word_count were threaded in here
+    # but never used; dwell_s was hardcoded 0 at every call site below, so
+    # giveup_threshold_s/max_dwell_s could never fire in autonomous mode. Same
+    # formula the (legacy) scripted path's decide() node already uses: word count on
+    # the current screen / this persona's reading speed x their dwell multiplier.
+    _bp = behavior_profile or {}
+    _wpm = float(_bp.get("reading_speed_wpm", 200))
+    _dwell_mult = float(_bp.get("dwell_multiplier", 1.0))
+
+    def _dwell() -> float:
+        try:
+            wc = max(len(page.inner_text("body").split()), 1)
+        except Exception:
+            wc = 1
+        return round((wc / _wpm) * 60.0 * _dwell_mult, 2)
+
     def _field_values() -> str:
         """List each form field's current value. The a11y tree omits values, so without
         this a weak model re-fills an already-filled field forever (it looks empty)."""
@@ -617,7 +633,7 @@ def run_agent(
     steps.append(StepSignals(
         step_idx=idx, step_key=_screen_key(landing_url, landing_aria),
         step_label="landed on screen", critical=False,
-        dwell_s=0, retries=0, dead_end=False, completed=True,
+        dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
         llm_confusion=0, reading_grade=grade,
         wcag=screen_wcag,
     ))
@@ -742,7 +758,7 @@ def run_agent(
                 step_idx=idx,
                 step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
                 step_label=step_label, critical=False,
-                dwell_s=0, retries=0, dead_end=False, completed=True,
+                dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
                 llm_confusion=confusion, reading_grade=grade, say=say,
                 wcag=screen_wcag,
             )
@@ -765,7 +781,7 @@ def run_agent(
                 step = StepSignals(
                     step_idx=idx, step_key=_screen_key(page.url, aria_now),
                     step_label=step_label, critical=False,
-                    dwell_s=0, retries=0, dead_end=False, completed=True,
+                    dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
                     llm_confusion=confusion, reading_grade=grade, say=say,
                     wcag=screen_wcag,
                 )
@@ -787,7 +803,7 @@ def run_agent(
                 step_idx=idx,
                 step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
                 step_label=step_label, critical=False,
-                dwell_s=0, retries=0, dead_end=True, completed=False,
+                dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
                 llm_confusion=confusion, reading_grade=grade, say=say,
                 wcag=screen_wcag,
             )
@@ -812,7 +828,7 @@ def run_agent(
                 step = StepSignals(
                     step_idx=idx, step_key=_screen_key(page.url, aria_now),
                     step_label=step_label, critical=False,
-                    dwell_s=0, retries=0, dead_end=False, completed=True,
+                    dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
                     llm_confusion=0, reading_grade=grade, say=say,
                     wcag=screen_wcag,
                 )
@@ -834,7 +850,7 @@ def run_agent(
             # Not at goal and no action — blocked
             step = StepSignals(
                 step_idx=idx, step_key="no_action", step_label="no_action", critical=False,
-                dwell_s=0, retries=0, dead_end=True, completed=False,
+                dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
                 llm_confusion=0, reading_grade=grade,
                 wcag=screen_wcag,
             )
@@ -875,7 +891,7 @@ def run_agent(
             step_idx=idx,
             step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
             step_label=step_label, critical=False,
-            dwell_s=0, retries=0, dead_end=dead_end, completed=not dead_end,
+            dwell_s=_dwell(), retries=0, dead_end=dead_end, completed=not dead_end,
             llm_confusion=confusion, reading_grade=grade, say=say,
             wcag=screen_wcag,
         )
@@ -911,7 +927,7 @@ def run_agent(
     # Max turns exhausted
     step = StepSignals(
         step_idx=idx, step_key="max_turns", step_label="max_turns", critical=False,
-        dwell_s=0, retries=0, dead_end=True, completed=False,
+        dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
         llm_confusion=0, reading_grade=grade,
     )
     steps.append(step)
