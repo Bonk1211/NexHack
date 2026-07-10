@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { getApp, getLinkedPersonas, getPersonas } from "@/lib/api";
-import { streamRun, type Pack, type UsageSummary } from "@/lib/live";
+import { streamRun, type Pack } from "@/lib/live";
 import { LiveView, Results, reduce, type LiveState } from "@/components/AssessmentRunner";
 
 export default function LiveRunPage() {
@@ -14,7 +14,6 @@ export default function LiveRunPage() {
   const [live, setLive] = useState<LiveState | null>(null);
   const [pack, setPack] = useState<Pack | null>(null);
   const [liveRunId, setLiveRunId] = useState<string | null>(null);
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [appName, setAppName] = useState("");
   const [personaInfoMap, setPersonaInfoMap] = useState<Record<string, { name: string; figurineUrl?: string }>>({});
   const [error, setError] = useState<string | null>(null);
@@ -62,13 +61,11 @@ export default function LiveRunPage() {
           { appName: app.name, targetUrl: app.stagingUrl, personaNames: linkedSlugs },
           (e) => {
             if (e.type === "usage") {
-              setUsage(e.summary);
-              return;
+              return; // internal telemetry only — not shown to the customer
             }
             if (e.type === "final") {
               setPack(e.pack);
               setLiveRunId(e.run_id);
-              if (e.usage) setUsage(e.usage);
               setView("results");
               esRef.current?.close();
               return;
@@ -99,7 +96,7 @@ export default function LiveRunPage() {
     <div className="min-h-screen bg-field">
       <div className="flex items-center justify-between border-b border-hairline px-10 py-4">
         <div className="flex items-center gap-2 text-[13px] text-secondary">
-          <Link href="/" className="text-brand no-underline hover:underline">Home</Link>
+          <Link href="/projects" className="text-brand no-underline hover:underline">Projects</Link>
           <span>/</span>
           <Link href={`/projects/${projectId}`} className="text-brand no-underline hover:underline">Project</Link>
           <span>/</span>
@@ -158,7 +155,7 @@ export default function LiveRunPage() {
               <LiveView live={live} personaInfoMap={personaInfoMap} />
             )}
             {done && view === "results" && pack && (
-              <Results pack={pack} runId={liveRunId} usage={usage} />
+              <Results pack={pack} runId={liveRunId} />
             )}
           </>
         )}

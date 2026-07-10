@@ -26,16 +26,101 @@ tests network-free (§22) and the demo reproducible.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import pathlib as _pl
+import re
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from app.agents.signals import axe_to_wcag, run_axe
 from app.config import settings
 from app.llm_usage import record_usage
 from app.scoring.engine import StepSignals
 
 logger = logging.getLogger(__name__)
+
+_HEADING_RE = re.compile(r'heading\s+"([^"]+)"')
+# Matches a11y-tree lines like `- textbox "Mobile Number":` or `- button "Continue"`
+# — role + accessible name, which stays stable regardless of what's TYPED into a
+# field (Playwright's snapshot exposes the accessible name, not the live value).
+_ROLE_NAME_RE = re.compile(r'-\s*(\w+)\s+"([^"]*)"')
+
+
+def _structural_hash(aria: str) -> str:
+    """Short hash of the page's (role, name) skeleton — headings/buttons/fields
+    present, not their values or incidental copy. Two different SPA screens under
+    the SAME url produce different hashes because the skeleton itself differs;
+    the same screen re-rendered (a field gets typed into, a toast appears)
+    produces the same hash almost always, so this doesn't cause redundant re-scans
+    on every keystroke."""
+    pairs = sorted(set(_ROLE_NAME_RE.findall(aria or "")))
+    blob = "|".join(f"{r}:{n}" for r, n in pairs)
+    return hashlib.md5(blob.encode()).hexdigest()[:8]
+
+
+def _url_path(url: str) -> str:
+    """'https://x.com/signup/otp?a=1' -> '/signup/otp' — drops host/query so the
+    same logical screen keys identically across personas hitting the same app."""
+    path = urlparse(url).path.rstrip("/")
+    return path or "/"
+
+
+def _screen_key(url: str, aria: str) -> str:
+    """A cross-persona-comparable screen identity: URL path + a heading from the
+    a11y tree. The URL path alone disambiguates multi-page flows; the heading
+    also disambiguates SPA screens that never change the URL. Two personas
+    hitting the SAME screen in the SAME app always produce the same key, which
+    is what makes the friction matrix's columns comparable (§14) — unlike the
+    LLM's free-text step_label, which differs by persona/turn phrasing.
+
+    Uses the LAST heading, not the first: many apps render a persistent
+    level-1 site title in a banner ("MyRakyat Services") ahead of the actual
+    per-step content heading ("Identity Verification") in <main>. Taking the
+    first heading collapses every screen in that layout into one column —
+    verified against the real MyRakyat markup, where the banner heading is
+    always first and the step heading always follows it."""
+    path = _url_path(url)
+    headings = _HEADING_RE.findall(aria or "")
+    heading = headings[-1].strip() if headings else ""
+    return f"{path} — {heading}" if heading else path
+
+
+def _screen_signature(url: str, aria: str) -> str:
+    """Internal change-detection key for 'should axe re-scan this turn?' — NOT
+    for display (see `_screen_key` for the human-readable matrix column name).
+
+    URL path alone under-detects a true SPA that swaps screens via client state
+    without changing the URL (e.g. React state, no router) — axe would then only
+    ever scan whatever screen happened to be first. Adding the structural hash
+    (§10) catches that case: two different screens under the same URL produce
+    different (role, name) skeletons even when the URL never moves."""
+    return f"{_url_path(url)}#{_structural_hash(aria)}"
+
+
+def _goal_reached(
+    url: str, aria: str, success_url: str, success_element: str, default: bool = False,
+) -> bool:
+    """Dual-gate goal check. When BOTH a success_url and success_element are
+    configured, success_element wins — success_url is often just a path prefix
+    a flow reuses across multiple screens (e.g. a pre-submit form and its
+    post-submit confirmation both live at the same URL in a SPA), so treating
+    it as independently sufficient (the old `url_ok or elem_ok`) marks the
+    persona 'completed' the moment they land on the FORM, before they've
+    actually submitted anything. success_element (a specific confirmation
+    heading) is the only signal that actually distinguishes the two. Falls
+    back to the URL when no element is configured, and to `default` when
+    neither is — callers auto-deciding completion want that False (nothing
+    configured means never auto-fire); the LLM's own "done" self-report wants
+    True (nothing configured means there's no gate to check against, so trust
+    the model's own judgement)."""
+    if success_element:
+        return success_element in aria
+    if success_url:
+        return success_url.lstrip("/") in url
+    return default
 
 
 # --- Structured schemas -----------------------------------------------------
@@ -203,8 +288,13 @@ _MCP_SYSTEM = (
     "Respond with ONE of these JSON forms:\n\n"
     '  {"exec": "<Playwright Python code>", "step_label": "<what you just did>", '
     '"confusion": <0.0-1.0>, "reasoning": "<one sentence>", "say": "<one short first-person sentence>"}\n\n'
-    '  {"done": true, "reasoning": "<why goal is achieved>", "say": "<one short first-person sentence>"}\n\n'
-    '  {"blocked": true, "reasoning": "<why no path forward>", "say": "<one short first-person sentence>"}\n\n'
+    '  {"done": true, "reasoning": "<why goal is achieved>", "say": "<one short first-person sentence>", '
+    '"closing": "<one sentence of genuine feedback on the experience as a whole — '
+    'e.g. this was easy, effortless, good design, or note anything that was still confusing>"}\n\n'
+    '  {"blocked": true, "reasoning": "<why no path forward>", "say": "<one short first-person sentence>", '
+    '"closing": "<one sentence stating your SPECIFIC reason for giving up — e.g. I don\'t know how '
+    'to proceed, I can\'t find/see the button or field I need, I tried multiple times and it '
+    'didn\'t work>"}\n\n'
     "The `page` object is in scope. You can call any sync Playwright method on it:\n"
     "  page.get_by_role('textbox', name='Mobile Number').fill('0123456789')\n"
     "  page.get_by_role('button', name='Continue').click()\n"
@@ -227,7 +317,10 @@ _MCP_SYSTEM = (
     "6. Confusion 0.0=obvious, 1.0=very confused but keep trying.\n"
     "7. 'say' is ONE short first-person sentence in THIS persona's voice — what you're "
     "thinking or feeling right now (doubt, relief, confusion, impatience). Stay fully in "
-    "character; never mention being an AI, a test, a screen reader, or an accessibility tree."
+    "character; never mention being an AI, a test, a screen reader, or an accessibility tree.\n"
+    "8. 'closing' (done/blocked only) is your FINAL word on the whole experience, not just this "
+    "moment — distinct from 'say'. If done: concrete feedback (easy, effortless, good design, or "
+    "what was still rough). If blocked: a concrete, specific reason you're giving up, not a vague one."
 )
 
 # Whitelist of safe page methods for exec(). The LLM can only call methods
@@ -259,6 +352,17 @@ def _play_exec(page, code: str) -> str:
         # Wait for any navigation to settle
         try:
             page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        # A client-side SPA route change (history.pushState, no real network request)
+        # can update page.url a render tick or more before the new screen's heading
+        # actually paints — networkidle only tracks network activity, so it doesn't
+        # catch this. Without a settle buffer, _screen_key() reads the OLD url paired
+        # with the NEW heading (or vice versa), fabricating a screen that never really
+        # existed and fragmenting the friction matrix into an extra "na" column that
+        # only whichever persona happened to land on that exact transition window hits.
+        try:
+            page.wait_for_timeout(200)
         except Exception:
             pass
         url = page.url
@@ -327,6 +431,23 @@ def _say_language(persona_voice: str) -> str:
     return "English"
 
 
+def _capture_shot(page, artifact_dir: str | None, idx: int) -> str | None:
+    """Screenshot the current page for step `idx`, or None if it can't be taken.
+    Shared by every place a step gets recorded — including the terminal
+    done/goal-reached branches, which used to skip this and leave the final
+    success screen with no frame in the empathy replay."""
+    if not artifact_dir:
+        return None
+    d = _pl.Path(artifact_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    shot = str(d / f"step_{idx}.png")
+    try:
+        page.screenshot(path=shot)
+    except Exception:
+        return None
+    return shot
+
+
 def _handle_pending_upload(page, handled: set, artifact_dir: str | None) -> str | None:
     """Set any not-yet-handled file <input> with the fixture image. Returns a human
     line on success, else None. Keyed by URL+index so each page's upload fires once
@@ -348,6 +469,51 @@ def _handle_pending_upload(page, handled: set, artifact_dir: str | None) -> str 
         except Exception:
             continue  # not settable (e.g. detached) — move on, key stays marked
     return None
+
+
+def _closing_reflection(client, persona_voice: str, blocked: bool, context: str) -> str:
+    """One cheap extra call for genuine persona-voiced final feedback.
+
+    The auto-detect completion path (goal reached mid-exec, no explicit "done"
+    turn) never otherwise gives the LLM a chance to reflect — which is the
+    COMMON case for a smooth run, since success fires the instant the gate
+    passes. Without this, every fast completion would read as the same
+    generic templated line, telling a reader nothing beyond the verdict they
+    can already see. Best-effort: any failure just falls back to the caller's
+    templated string, never blocks the run."""
+    if client is None:
+        return ""
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        system = (
+            'You are a user persona reflecting on a web app flow you just finished. '
+            'Respond with JSON: {"closing": "<one sentence, first-person, in character>"}. '
+            + (
+                "State a concrete reason you gave up — don't know how to proceed, "
+                "can't find/see the button or field you need, tried multiple times "
+                "and it didn't work."
+                if blocked else
+                "Give genuine feedback on the experience as a whole — easy, "
+                "effortless, good design, or note anything that was still rough."
+            )
+        )
+        human = f"PERSONA: {persona_voice}\n{context}"
+        ai = client.invoke(
+            [SystemMessage(content=system), HumanMessage(content=human)],
+            config={"response_format": {"type": "json_object"}},
+        )
+        usage = getattr(ai, "usage_metadata", None) or {}
+        model_name = getattr(client, "model", getattr(client, "model_name", ""))
+        record_usage(
+            model_name or settings.llm_model_step,
+            usage.get("input_tokens") or usage.get("prompt_tokens"),
+            usage.get("output_tokens") or usage.get("completion_tokens"),
+        )
+        payload = json.loads(_extract_text(ai.content))
+        return (payload.get("closing") or "").strip()
+    except Exception:
+        return ""
 
 
 def run_agent(
@@ -378,13 +544,12 @@ def run_agent(
     and per-site patches. Returns accumulated steps/shots/status.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
-    import pathlib as _pl
 
     client = _client(settings.llm_model_step)
     if client is None:
         return {
             "steps": [StepSignals(
-                step_idx=step_idx, step_key="offline", critical=False,
+                step_idx=step_idx, step_key="offline", step_label="offline", critical=False,
                 dwell_s=0, retries=0, dead_end=True, completed=False,
                 llm_confusion=0, reading_grade=grade,
             )],
@@ -392,6 +557,7 @@ def run_agent(
             "status": "blocked", "blocked_at": "offline",
             "blocked_url": current_url,
             "current_url": current_url, "url_visit_counts": url_visit_counts or {},
+            "closing": "Run couldn't start — no LLM connection, not a persona-experience finding.",
         }
 
     hints = hints or {}
@@ -401,6 +567,22 @@ def run_agent(
     idx = step_idx
     max_turns = 20
     stuck_limit = 20
+
+    # Modeled reading dwell (§23) — behavior_profile/word_count were threaded in here
+    # but never used; dwell_s was hardcoded 0 at every call site below, so
+    # giveup_threshold_s/max_dwell_s could never fire in autonomous mode. Same
+    # formula the (legacy) scripted path's decide() node already uses: word count on
+    # the current screen / this persona's reading speed x their dwell multiplier.
+    _bp = behavior_profile or {}
+    _wpm = float(_bp.get("reading_speed_wpm", 200))
+    _dwell_mult = float(_bp.get("dwell_multiplier", 1.0))
+
+    def _dwell() -> float:
+        try:
+            wc = max(len(page.inner_text("body").split()), 1)
+        except Exception:
+            wc = 1
+        return round((wc / _wpm) * 60.0 * _dwell_mult, 2)
 
     def _field_values() -> str:
         """List each form field's current value. The a11y tree omits values, so without
@@ -429,11 +611,49 @@ def run_agent(
     last_code = ""    # last exec code — detect a model looping the same action
     repeat = 0        # consecutive identical actions
 
+    # TRUSTED stream (§16): `wcag` param is observe()'s one scan of the entry
+    # screen. Re-scan with axe whenever the screen signature changes (URL path +
+    # a11y-tree structural hash — see _screen_signature) so a multi-page flow's
+    # OTP/personal-details/submit screens get checked too, not just page 1, AND a
+    # true SPA that swaps screens without changing the URL still gets caught —
+    # this loop is the only place those page transitions happen in autonomous mode.
+    last_axe_screen = _screen_signature(current_url, aria) if wcag else None
+    screen_wcag = wcag
+
+    # Landing step: the persona's starting screen never otherwise gets a step of
+    # its own — the first turn's step_key is captured AFTER its exec code runs,
+    # so if that first action both fills and submits a field in one turn (some
+    # personas act more confidently than others), the entry screen's column is
+    # skipped entirely and the friction matrix shows "na" there for this persona
+    # even though everyone starts on it. This is a fixed-cost observation, not
+    # an action, so it can never itself be a friction point.
+    landing_url = current_url if aria else page.url
+    landing_aria = aria if aria else page.locator("body").aria_snapshot()
+    landing_shot = _capture_shot(page, artifact_dir, idx)
+    steps.append(StepSignals(
+        step_idx=idx, step_key=_screen_key(landing_url, landing_aria),
+        step_label="landed on screen", critical=False,
+        dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
+        llm_confusion=0, reading_grade=grade,
+        wcag=screen_wcag,
+    ))
+    if landing_shot:
+        shots.append(landing_shot)
+    idx += 1
+
     for turn in range(max_turns):
         current_url = page.url
         url_counts[current_url] = url_counts.get(current_url, 0) + 1
         stuck = url_counts[current_url] >= stuck_limit
         hints_text = ", ".join(f"{k}={v}" for k, v in hints.items()) if hints else "none"
+
+        screen_sig = _screen_signature(current_url, page.locator("body").aria_snapshot())
+        if screen_sig != last_axe_screen:
+            try:
+                screen_wcag = axe_to_wcag(run_axe(page))
+            except Exception:
+                screen_wcag = ()
+            last_axe_screen = screen_sig
 
         # Deterministic document upload — the LLM can't author a file, so clear any
         # pending file <input> before it gets stuck, then re-observe and continue.
@@ -442,19 +662,12 @@ def run_agent(
             upload_say = _upload_say(persona_voice)
             if on_say:
                 on_say(upload_say)
-            shot = None
-            if artifact_dir:
-                d = _pl.Path(artifact_dir)
-                d.mkdir(parents=True, exist_ok=True)
-                shot = str(d / f"step_{idx}.png")
-                try:
-                    page.screenshot(path=shot)
-                except Exception:
-                    shot = None
+            shot = _capture_shot(page, artifact_dir, idx)
             step = StepSignals(
-                step_idx=idx, step_key="upload document", critical=True,
+                step_idx=idx, step_key="upload document", step_label="upload document", critical=True,
                 dwell_s=0, retries=0, dead_end=False, completed=True,
                 llm_confusion=0, reading_grade=grade, say=upload_say,
+                wcag=screen_wcag,
             )
             steps.append(step)
             if shot:
@@ -502,7 +715,7 @@ def run_agent(
         except Exception as exc:
             logger.warning("run_agent: LLM call failed on turn %d: %s", turn, exc)
             step = StepSignals(
-                step_idx=idx, step_key="llm_error", critical=False,
+                step_idx=idx, step_key="llm_error", step_label="llm_error", critical=False,
                 dwell_s=0, retries=0, dead_end=True, completed=False,
                 llm_confusion=0, reading_grade=grade,
             )
@@ -512,21 +725,25 @@ def run_agent(
                 "status": "blocked", "blocked_at": "llm_error",
                 "blocked_url": current_url,
                 "current_url": current_url, "url_visit_counts": url_counts,
+                "closing": "Run failed on a technical error, not a persona-experience finding.",
             }
 
         step_label = payload.get("step_label", f"turn_{turn}")
         confusion = float(payload.get("confusion", 0))
         say = payload.get("say", "")
+        closing = (payload.get("closing") or "").strip()
         # Emit the persona's line LIVE — run_agent returns all steps at once, so without
         # this the monologue would only surface when the whole persona loop finishes.
         if on_say and say:
             on_say(say)
 
-        # --- done (dual gate: URL or element) -------------------------------
+        # --- done (dual gate: element wins over a shared/loose URL) --------
         if payload.get("done"):
-            url_ok = not success_url or success_url.lstrip("/") in page.url
-            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
-            if not url_ok and not elem_ok:
+            gate_ok = _goal_reached(
+                page.url, page.locator("body").aria_snapshot(),
+                success_url, success_element, default=True,
+            )
+            if not gate_ok:
                 gates = []
                 if success_url: gates.append(f"URL contains '{success_url}'")
                 if success_element: gates.append(f"a11y tree contains '{success_element[:80]}'")
@@ -536,71 +753,106 @@ def run_agent(
                 snapshot = f"Action rejected — still at: {_snap()}"
                 continue
 
+            shot = _capture_shot(page, artifact_dir, idx)
             step = StepSignals(
-                step_idx=idx, step_key=step_label, critical=False,
-                dwell_s=0, retries=0, dead_end=False, completed=True,
+                step_idx=idx,
+                step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
+                step_label=step_label, critical=False,
+                dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
                 llm_confusion=confusion, reading_grade=grade, say=say,
+                wcag=screen_wcag,
             )
             steps.append(step)
+            if shot:
+                shots.append(shot)
             return {
                 "steps": steps, "shots": shots, "step_idx": idx + 1,
                 "status": "completed", "blocked_at": None, "blocked_url": None,
                 "current_url": page.url, "url_visit_counts": url_counts,
+                "closing": closing or "Completed the flow.",
             }
 
         # --- blocked --------------------------------------------------------
         if payload.get("blocked") or stuck:
             # Override: if goal is objectively reached, complete regardless.
-            url_ok = success_url and success_url.lstrip("/") in page.url
-            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
-            if url_ok or elem_ok:
+            aria_now = page.locator("body").aria_snapshot()
+            if _goal_reached(page.url, aria_now, success_url, success_element):
+                shot = _capture_shot(page, artifact_dir, idx)
                 step = StepSignals(
-                    step_idx=idx, step_key="goal reached", critical=False,
-                    dwell_s=0, retries=0, dead_end=False, completed=True,
-                    llm_confusion=confusion, reading_grade=grade,
+                    step_idx=idx, step_key=_screen_key(page.url, aria_now),
+                    step_label=step_label, critical=False,
+                    dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
+                    llm_confusion=confusion, reading_grade=grade, say=say,
+                    wcag=screen_wcag,
                 )
                 steps.append(step)
+                if shot:
+                    shots.append(shot)
                 return {
                     "steps": steps, "shots": shots, "step_idx": idx + 1,
                     "status": "completed", "blocked_at": None, "blocked_url": None,
                     "current_url": page.url, "url_visit_counts": url_counts,
+                    # The persona thought it was giving up (its own `closing`, if any,
+                    # is a quit reason) — but the goal was actually reached, so reusing
+                    # that text here would contradict the "completed" verdict. Same
+                    # inconsistency this whole fix is for; state the real outcome instead.
+                    "closing": "Reached the goal, though success wasn't obvious right away.",
                 }
+            shot = _capture_shot(page, artifact_dir, idx)
             step = StepSignals(
-                step_idx=idx, step_key=step_label, critical=False,
-                dwell_s=0, retries=0, dead_end=True, completed=False,
+                step_idx=idx,
+                step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
+                step_label=step_label, critical=False,
+                dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
                 llm_confusion=confusion, reading_grade=grade, say=say,
+                wcag=screen_wcag,
             )
             steps.append(step)
+            if shot:
+                shots.append(shot)
             return {
                 "steps": steps, "shots": shots, "step_idx": idx + 1,
                 "status": "blocked", "blocked_at": step_label,
                 "blocked_url": page.url,
                 "current_url": page.url, "url_visit_counts": url_counts,
+                "closing": closing or "Got stuck and couldn't find a way to continue.",
             }
 
         # --- exec -----------------------------------------------------------
         code = payload.get("exec", "")
         if not code:
             # Empty response — LLM has nothing to do. Auto-check if at goal.
-            url_ok = success_url and success_url.lstrip("/") in page.url
-            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
-            if url_ok or elem_ok:
+            aria_now = page.locator("body").aria_snapshot()
+            if _goal_reached(page.url, aria_now, success_url, success_element):
+                shot = _capture_shot(page, artifact_dir, idx)
                 step = StepSignals(
-                    step_idx=idx, step_key="goal reached", critical=False,
-                    dwell_s=0, retries=0, dead_end=False, completed=True,
-                    llm_confusion=0, reading_grade=grade,
+                    step_idx=idx, step_key=_screen_key(page.url, aria_now),
+                    step_label=step_label, critical=False,
+                    dwell_s=_dwell(), retries=0, dead_end=False, completed=True,
+                    llm_confusion=0, reading_grade=grade, say=say,
+                    wcag=screen_wcag,
                 )
                 steps.append(step)
+                if shot:
+                    shots.append(shot)
+                dead_ends = sum(1 for s in steps if s.dead_end)
+                reflection = _closing_reflection(
+                    client, persona_voice, False,
+                    f"You just completed the goal: {goal}. Over {len(steps)} steps, "
+                    f"you hit {dead_ends} dead end(s) along the way.",
+                )
                 return {
                     "steps": steps, "shots": shots, "step_idx": idx + 1,
                     "status": "completed", "blocked_at": None, "blocked_url": None,
                     "current_url": page.url, "url_visit_counts": url_counts,
+                    "closing": reflection or "Reached the goal.",
                 }
             # Not at goal and no action — blocked
             step = StepSignals(
-                step_idx=idx, step_key="no_action", critical=False,
-                dwell_s=0, retries=0, dead_end=True, completed=False,
+                step_idx=idx, step_key="no_action", step_label="no_action", critical=False,
+                dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
                 llm_confusion=0, reading_grade=grade,
+                wcag=screen_wcag,
             )
             steps.append(step)
             return {
@@ -608,6 +860,7 @@ def run_agent(
                 "status": "blocked", "blocked_at": "no_action",
                 "blocked_url": page.url,
                 "current_url": page.url, "url_visit_counts": url_counts,
+                "closing": "Ran out of ideas for what to try next.",
             }
         else:
             result_msg = _play_exec(page, code)
@@ -631,23 +884,16 @@ def run_agent(
                 repeat = 0
             last_code = code.strip()
 
-        # Screenshot
-        shot = None
-        if artifact_dir:
-            d = _pl.Path(artifact_dir)
-            d.mkdir(parents=True, exist_ok=True)
-            shot = str(d / f"step_{idx}.png")
-            try:
-                page.screenshot(path=shot)
-            except Exception:
-                pass
+        shot = _capture_shot(page, artifact_dir, idx)
 
         dead_end = result_msg.startswith("ERROR")
         step = StepSignals(
-            step_idx=idx, step_key=step_label, critical=False,
-            dwell_s=0, retries=0, dead_end=dead_end, completed=not dead_end,
+            step_idx=idx,
+            step_key=_screen_key(page.url, page.locator("body").aria_snapshot()),
+            step_label=step_label, critical=False,
+            dwell_s=_dwell(), retries=0, dead_end=dead_end, completed=not dead_end,
             llm_confusion=confusion, reading_grade=grade, say=say,
-            wcag=wcag if idx == 0 else (),
+            wcag=screen_wcag,
         )
         steps.append(step)
         if shot:
@@ -656,13 +902,20 @@ def run_agent(
 
         # Auto-detect success: if the exec brought us to the goal, complete immediately.
         if not dead_end:
-            url_ok = success_url and success_url.lstrip("/") in page.url
-            elem_ok = success_element and success_element in page.locator("body").aria_snapshot()
-            if url_ok or elem_ok:
+            if _goal_reached(
+                page.url, page.locator("body").aria_snapshot(), success_url, success_element,
+            ):
+                dead_ends = sum(1 for s in steps if s.dead_end)
+                reflection = _closing_reflection(
+                    client, persona_voice, False,
+                    f"You just completed the goal: {goal}. Over {len(steps)} steps, "
+                    f"you hit {dead_ends} dead end(s) along the way.",
+                )
                 return {
                     "steps": steps, "shots": shots, "step_idx": idx,
                     "status": "completed", "blocked_at": None, "blocked_url": None,
                     "current_url": page.url, "url_visit_counts": url_counts,
+                    "closing": reflection or "Reached the goal.",
                 }
 
         # Next turn's snapshot
@@ -673,8 +926,8 @@ def run_agent(
 
     # Max turns exhausted
     step = StepSignals(
-        step_idx=idx, step_key="max_turns", critical=False,
-        dwell_s=0, retries=0, dead_end=True, completed=False,
+        step_idx=idx, step_key="max_turns", step_label="max_turns", critical=False,
+        dwell_s=_dwell(), retries=0, dead_end=True, completed=False,
         llm_confusion=0, reading_grade=grade,
     )
     steps.append(step)
@@ -683,6 +936,7 @@ def run_agent(
         "status": "blocked", "blocked_at": "max_turns",
         "blocked_url": page.url,
         "current_url": page.url, "url_visit_counts": url_counts,
+        "closing": "Tried multiple times but never got through — gave up after too many attempts.",
     }
 
 

@@ -72,6 +72,24 @@ def list_runs(app_name: str, limit: int = 50) -> list[dict]:
     ]
 
 
+def get_quota() -> dict:
+    """Customer-facing plan usage (§SaaS revamp): {"used": <total runs>, "limit": N}.
+
+    Global count — there's no auth/org model yet, so "the account" is the whole
+    instance. Falls back to {"used": 0, "limit": settings.plan_run_quota} when
+    Supabase is unconfigured, same degrade pattern as everywhere else here.
+    """
+    limit = settings.plan_run_quota
+    if not _has_creds():
+        return {"used": 0, "limit": limit}
+
+    from app.db import get_client  # deferred — keeps this module import network-free
+
+    client = get_client()
+    res = client.table("runs").select("id", count="exact").execute()
+    return {"used": res.count or 0, "limit": limit}
+
+
 def get_run(run_id: str) -> dict | None:
     """The full persisted evidence pack for one run, or None.
 
@@ -243,6 +261,12 @@ def persist_run(
                     "screenshot_url": shots[idx] if idx < len(shots) else None,
                 }
             ).execute()
+
+    # Tuck the token/cost rollup into the pack blob so the historical detail page
+    # rehydrates the same Token-usage card the live finish screen showed (it's kept
+    # off the inclusion score — operational metadata only, §16).
+    if usage:
+        pack["usage"] = usage
 
     # evidence_packs (§17): the primary output artifact. Render JSON + PDF once and
     # upload both to Storage; the public URLs are persisted for download. Best-effort:

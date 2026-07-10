@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     wcag_version: str = "2.2"
     slack_webhook_url: str = ""
 
+    # Customer-facing plan quota (§SaaS revamp) — runs/month included in the plan.
+    # Operational cost tracking (llm_pricing above) stays internal; this is the
+    # number shown to the customer instead.
+    plan_run_quota: int = 500
+
     # Per-persona crash-resume checkpoint store (§8 run graph).
     checkpoint_db: str = "checkpoints.sqlite"
 

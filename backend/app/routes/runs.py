@@ -292,6 +292,16 @@ def list_runs(app_name: str | None = None) -> list[dict]:
     return response
 
 
+@router.get("/quota")
+def get_quota() -> dict:
+    """Customer-facing plan usage: {"used": <total runs>, "limit": <plan cap>}.
+
+    Registered before the `/{run_id}` catch-all below so "quota" is never matched
+    as a run_id.
+    """
+    return repository.get_quota()
+
+
 @router.post("")
 def start_run(req: StartRunRequest) -> dict:
     # run_id doubles as the run graph's checkpointer thread_id. A client may pass an
@@ -387,7 +397,22 @@ def stream_run(
     def worker():
         try:
             set_tracker(tracker)
-            q.put({"type": "node", "scope": "run", "node": "init", "personas": names})
+
+            # Record every event (except video-rate frames + the terminal usage/final)
+            # so the run's journey can be replayed on the historical detail page through
+            # the SAME frontend reducer — making a revisited run identical to the live
+            # finish screen. ponytail: journey screenshot refs stay /artifacts URLs served
+            # from disk; wipe the artifacts dir and historical thumbnails 404 (Results'
+            # replay screenshots are Storage-backed and unaffected).
+            journey: list[dict] = []
+            _JOURNEY_SKIP = {"frame", "usage", "final"}
+
+            def emit(item: dict) -> None:
+                if item.get("type") not in _JOURNEY_SKIP:
+                    journey.append(item)
+                q.put(item)
+
+            emit({"type": "node", "scope": "run", "node": "init", "personas": names})
 
             def run_one(i: int, name: str) -> tuple[PersonaRunResult, list]:
                 """Drive one persona end-to-end, emitting its nodes onto `q`.
@@ -426,8 +451,8 @@ def stream_run(
                     "success_element": flow_cfg.get("success_element", ""),
                     "persona_voice": persona_voice,
                 }
-                q.put({"type": "persona_start", "persona": name, "idx": i,
-                       "label": cfg.get("name", name)})
+                emit({"type": "persona_start", "persona": name, "idx": i,
+                      "label": cfg.get("name", name)})
 
                 def on_frame(b64, _name=name):
                     try:
@@ -438,10 +463,21 @@ def stream_run(
                 def on_say(text, _name=name):
                     # Per-turn monologue, emitted LIVE (the agent node returns all steps
                     # at once, so this is the only way the bubbles stream as they happen).
-                    q.put({"type": "monologue", "persona": _name, "text": text})
+                    emit({"type": "monologue", "persona": _name, "text": text})
 
                 steps, shots = [], []
+                final_status, final_blocked_at, final_closing = None, None, ""
                 for node, data in stream_persona(payload, on_frame=on_frame, on_say=on_say):
+                    if node in ("agent", "act"):
+                        # The run's own authoritative outcome (dual-gate goal detection
+                        # already knows whether the persona ultimately got through, even
+                        # if an earlier step recorded a transient dead_end it recovered
+                        # from) — score() needs this, not just the raw per-step signals,
+                        # or a recovered dead_end permanently marks the whole persona
+                        # "blocked" despite later reaching the real finish line.
+                        final_status = data.get("status", final_status)
+                        final_blocked_at = data.get("blocked_at", final_blocked_at)
+                        final_closing = data.get("closing") or final_closing
                     if node == "agent":
                         # MCP agent — emits multiple steps per graph node invocation.
                         agent_steps = data.get("steps") or []
@@ -452,48 +488,56 @@ def stream_run(
                             shot = agent_shots[si] if si < len(agent_shots) else None
                             if shot:
                                 shots.append(shot)
-                            q.put({"type": "step", "scope": "persona", "persona": name,
-                                   "node": "agent", "step_idx": s.step_idx,
-                                   "step_key": s.step_key, "status": _step_status(s),
-                                   "confusion": s.llm_confusion, "dwell_s": s.dwell_s,
-                                   "output": {"step": s.step_key, "status": _step_status(s),
-                                              "dead_end": s.dead_end, "completed": s.completed},
-                                   "screenshot_url": _to_served_url(shot)})
+                            emit({"type": "step", "scope": "persona", "persona": name,
+                                  "node": "agent", "step_idx": s.step_idx,
+                                  "step_key": s.step_key, "status": _step_status(s),
+                                  "confusion": s.llm_confusion, "dwell_s": s.dwell_s,
+                                  "output": {"step": s.step_key, "status": _step_status(s),
+                                             "dead_end": s.dead_end, "completed": s.completed},
+                                  "screenshot_url": _to_served_url(shot)})
                     elif node == "observe":
-                        q.put({"type": "node", "scope": "persona", "persona": name,
-                               "node": "observe", "step_idx": len(steps),
-                               "output": {"captured": f"step {len(steps)} screen + a11y tree"},
-                               "screenshot_url": _to_served_url(data.get("current_shot"))})
+                        emit({"type": "node", "scope": "persona", "persona": name,
+                              "node": "observe", "step_idx": len(steps),
+                              "output": {"captured": f"step {len(steps)} screen + a11y tree"},
+                              "screenshot_url": _to_served_url(data.get("current_shot"))})
                     elif node == "comprehend":
-                        q.put({"type": "node", "scope": "persona", "persona": name,
-                               "node": "comprehend", "confusion": data.get("last_confusion"),
-                               "output": {"confusion": data.get("last_confusion"),
-                                          "reason": data.get("last_reason"),
-                                          "fallback_target": data.get("last_fallback")}})
+                        emit({"type": "node", "scope": "persona", "persona": name,
+                              "node": "comprehend", "confusion": data.get("last_confusion"),
+                              "output": {"confusion": data.get("last_confusion"),
+                                         "reason": data.get("last_reason"),
+                                         "fallback_target": data.get("last_fallback")}})
                     elif node == "decide":
-                        q.put({"type": "node", "scope": "persona", "persona": name,
-                               "node": "decide", "dwell_s": data.get("current_dwell"),
-                               "output": {"dwell_s": data.get("current_dwell"),
-                                          "label_block": data.get("current_label_block"),
-                                          "give_up": data.get("current_give_up")}})
+                        emit({"type": "node", "scope": "persona", "persona": name,
+                              "node": "decide", "dwell_s": data.get("current_dwell"),
+                              "output": {"dwell_s": data.get("current_dwell"),
+                                         "label_block": data.get("current_label_block"),
+                                         "give_up": data.get("current_give_up")}})
                     elif node == "act":
                         step = data["steps"][0]
                         shot = data["shots"][0]
                         steps.append(step)
                         shots.append(shot)
-                        q.put({"type": "step", "scope": "persona", "persona": name,
-                               "node": "act", "step_idx": step.step_idx,
-                               "step_key": step.step_key, "status": _step_status(step),
-                               "confusion": step.llm_confusion, "dwell_s": step.dwell_s,
-                               "output": {"step": step.step_key, "status": _step_status(step),
-                                          "dead_end": step.dead_end, "completed": step.completed},
-                               "screenshot_url": _to_served_url(shot)})
+                        emit({"type": "step", "scope": "persona", "persona": name,
+                              "node": "act", "step_idx": step.step_idx,
+                              "step_key": step.step_key, "status": _step_status(step),
+                              "confusion": step.llm_confusion, "dwell_s": step.dwell_s,
+                              "output": {"step": step.step_key, "status": _step_status(step),
+                                         "dead_end": step.dead_end, "completed": step.completed},
+                              "screenshot_url": _to_served_url(shot)})
 
-                res = PersonaRunResult(name, tuple(steps), thresholds, score(steps, thresholds))
+                res = PersonaRunResult(
+                    name, tuple(steps), thresholds,
+                    score(
+                        steps, thresholds,
+                        final_status=final_status or "",
+                        final_blocked_at=final_blocked_at,
+                    ),
+                    closing=final_closing,
+                )
                 v = res.result.persona_verdict
-                q.put({"type": "persona_done", "persona": name, "verdict": v.verdict,
-                       "severity": v.severity, "blocked_at": v.blocked_at,
-                       "blocked_url": payload.get("blocked_url")})
+                emit({"type": "persona_done", "persona": name, "verdict": v.verdict,
+                      "severity": v.severity, "blocked_at": v.blocked_at,
+                      "blocked_url": payload.get("blocked_url")})
                 return res, shots
 
             # Run personas concurrently (own browser each) or one at a time. Either way
@@ -512,9 +556,9 @@ def stream_run(
             shots_map: dict[str, list] = {name: per_persona[name][1] for name in names}
 
             # Reduce → score → evidence (the run-graph tail, narrated as nodes w/ output).
-            q.put({"type": "node", "scope": "run", "node": "aggregate",
-                   "output": {"ordered_personas": [r.persona for r in results]}})
-            q.put({"type": "node", "scope": "run", "node": "score",
+            emit({"type": "node", "scope": "run", "node": "aggregate",
+                  "output": {"ordered_personas": [r.persona for r in results]}})
+            emit({"type": "node", "scope": "run", "node": "score",
                    "output": {"scores": [
                        {"persona": r.persona,
                         "inclusion_score": r.result.composite.inclusion_score,
@@ -535,15 +579,22 @@ def stream_run(
             pack["synthesis"] = synthesize(pack).model_dump()
             wcag_fails = [c for c, vd in pack.get("wcag_conformance", {}).items() if vd == "fail"]
             blocked = [p["persona"] for p in pack["personas"] if p["verdict"] == "blocked"]
-            q.put({"type": "node", "scope": "run", "node": "evidence",
-                   "output": {"inclusion_score": pack["inclusion_score"],
-                              "wcag_failures": wcag_fails,
-                              "remediations": len(pack.get("remediation", [])),
-                              "blocked_personas": blocked,
-                              "rollup": pack["synthesis"].get("rollup")}})
+            emit({"type": "node", "scope": "run", "node": "evidence",
+                  "output": {"inclusion_score": pack["inclusion_score"],
+                             "wcag_failures": wcag_fails,
+                             "remediations": len(pack.get("remediation", [])),
+                             "blocked_personas": blocked,
+                             "rollup": pack["synthesis"].get("rollup")}})
+
+            # Emit alerts BEFORE persist so the run's full pipeline (incl. alerts) is
+            # captured in the journey and the historical view matches the finish screen.
+            emit({"type": "node", "scope": "run", "node": "alerts",
+                  "output": {"p0_alerts": len([p for p in pack["personas"]
+                                               if p.get("severity") == "P0"])}})
 
             # Serialize usage first so it persists onto the run row (dashboard §3.2).
             usage = tracker.serialized()
+            pack["journey"] = journey  # replayed on the historical detail page
             try:
                 repository.persist_run(
                     pack, run_id=rid, mode=mode, target_url=target_url, usage=usage
@@ -551,9 +602,6 @@ def stream_run(
             except Exception:
                 logger.warning("persist_run failed for run %s", rid, exc_info=True)
             _serve_screenshots(pack)
-            q.put({"type": "node", "scope": "run", "node": "alerts",
-                   "output": {"p0_alerts": len([p for p in pack["personas"]
-                                                if p.get("severity") == "P0"])}})
             _STORE[rid] = {"pack": pack, "usage": usage}
             _safe_enqueue(q, {"type": "usage", "summary": usage})
             q.put({"type": "final", "run_id": rid, "pack": pack, "usage": usage})
@@ -611,7 +659,7 @@ def get_run(run_id: str) -> dict:
     pack = repository.get_run(run_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="run not found")
-    return {"pack": pack, "usage": None}
+    return {"pack": pack, "usage": pack.get("usage")}
 
 
 def _safe_slug(text: str) -> str:

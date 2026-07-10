@@ -21,10 +21,23 @@ from typing import Optional
 # --- Inputs -----------------------------------------------------------------
 
 @dataclass(frozen=True)
+class WcagNode:
+    """One offending element for a failing WcagSignal — axe-core already computes
+    this per violation; we just weren't carrying it through (§10)."""
+    target: str             # CSS selector, e.g. "button.submit-btn"
+    html: str                # outer HTML snippet (truncated)
+    failure_summary: str     # axe's own plain-English explanation with real measurements
+
+
+@dataclass(frozen=True)
 class WcagSignal:
     """One machine-verifiable WCAG check on a step (TRUSTED, §10)."""
     criterion: str  # e.g. "1.4.3"
     passed: bool
+    rule_id: str = ""                     # axe rule id, e.g. "color-contrast"
+    description: str = ""                 # axe's plain-English rule description
+    help_url: str = ""                    # Deque University reference
+    nodes: tuple[WcagNode, ...] = ()      # offending elements (empty when passed)
 
 
 @dataclass(frozen=True)
@@ -41,6 +54,7 @@ class StepSignals:
     llm_confusion: float = 0.0                   # 0-1, vision-LLM "I don't know this field"
     reading_grade: Optional[float] = None        # Flesch-Kincaid grade of step copy
     say: str = ""                                # first-person monologue line for this step (live view only)
+    step_label: str = ""                         # human-readable action description, e.g. "filled OTP"; step_key is the machine screen identity used for cross-persona matrix grouping
 
 
 @dataclass(frozen=True)
@@ -135,8 +149,21 @@ def score(
     steps: list[StepSignals],
     thresholds: PersonaThresholds,
     weights: ScoreWeights = ScoreWeights(),
+    final_status: str = "",
+    final_blocked_at: Optional[str] = None,
 ) -> ScoreResult:
-    """Pure scoring function. score(signals) -> {wcag, verdict, composite} (§16)."""
+    """Pure scoring function. score(signals) -> {wcag, verdict, composite} (§16).
+
+    `final_status`/`final_blocked_at` are the run's own authoritative outcome
+    (already computed live by run_agent/act — dual-gate goal detection knows
+    the persona reached the real finish line even when an earlier step in
+    `steps` recorded a transient dead_end that was later recovered from). When
+    given, they decide the verdict; per-step `_step_blocks` still drives the
+    friction-matrix cell colors and severity below, since a recovered dead_end
+    is still worth flagging as a friction point even though it didn't block
+    the persona overall. Optional (defaults to the old any-dead_end-blocks
+    scan) so existing callers/tests that only pass steps still work.
+    """
     if not steps:
         empty_w = {}
         return ScoreResult(
@@ -161,14 +188,21 @@ def score(
     )
 
     # 2) Persona verdict (INDICATIVE).
-    blocked_at: Optional[str] = None
-    blocked_critical = False
-    for step in steps:
-        if _step_blocks(step, thresholds):
-            blocked_at = step.step_key
-            blocked_critical = step.critical
-            break
-    blocked = blocked_at is not None
+    if final_status:
+        blocked = final_status == "blocked"
+        blocked_at = final_blocked_at if blocked else None
+        blocked_critical = any(
+            step.critical and _step_blocks(step, thresholds) for step in steps
+        ) if blocked else False
+    else:
+        blocked_at = None
+        blocked_critical = False
+        for step in steps:
+            if _step_blocks(step, thresholds):
+                blocked_at = step.step_label or step.step_key
+                blocked_critical = step.critical
+                break
+        blocked = blocked_at is not None
     friction = any(_has_friction(step, thresholds) for step in steps)
     max_confusion = max(step.llm_confusion for step in steps)
 

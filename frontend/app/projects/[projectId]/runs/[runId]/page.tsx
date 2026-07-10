@@ -1,18 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { getRun, getPersonas } from "@/lib/api";
-import { getRunPack, type Pack, type UsageSummary } from "@/lib/live";
+import { getRunPack, type Pack } from "@/lib/live";
 import type { RunDetail } from "@/lib/types";
 import { ScoreRing } from "@/components/ScoreRing";
 import { PersonaWall } from "@/components/PersonaWall";
 import { FrictionMatrix } from "@/components/FrictionMatrix";
 import { RunLog } from "@/components/RunLog";
-import { Results } from "@/components/AssessmentRunner";
+import { Results, LiveView, reduce, type LiveState } from "@/components/AssessmentRunner";
 
-type LivePack = { pack: Pack; usage: UsageSummary | null };
+type LivePack = { pack: Pack };
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -59,8 +59,8 @@ export default function RunDetailPage() {
     <div>
       <div className="flex items-center justify-between border-b border-hairline px-10 py-4">
         <div className="flex items-center gap-2 text-[13px] text-secondary">
-          <Link href="/" className="text-brand no-underline hover:underline">
-            Home
+          <Link href="/projects" className="text-brand no-underline hover:underline">
+            Projects
           </Link>
           <span>/</span>
           <Link href={`/projects/${projectId}`} className="text-brand no-underline hover:underline">
@@ -78,7 +78,7 @@ export default function RunDetailPage() {
             <div className="mt-6 h-[400px] card shimmer" />
           </>
         ) : livePack ? (
-          <Results pack={livePack.pack} runId={runId} usage={livePack.usage} />
+          <LiveRunView pack={livePack.pack} runId={runId} />
         ) : run ? (
           <MockRunView run={run} personaNames={personaNames} runId={runId} />
         ) : (
@@ -86,6 +86,51 @@ export default function RunDetailPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// Persisted real run. Rebuilds the live journey from `pack.journey` through the same
+// reducer the live stream uses, so a revisited run offers the identical
+// Live preview | Results toggle the finish screen showed. Runs saved before the
+// journey was persisted have no `journey` — they fall back to Results only.
+function LiveRunView({
+  pack,
+  runId,
+}: {
+  pack: Pack;
+  runId: string;
+}) {
+  const live = useMemo<LiveState | null>(() => {
+    const events = pack.journey ?? [];
+    if (events.length === 0) return null;
+    return events.reduce(reduce, { runNodes: [], log: [], frames: {}, n: 1 } as LiveState);
+  }, [pack]);
+  const [view, setView] = useState<"live" | "results">("results");
+
+  return (
+    <>
+      {live && (
+        <div className="mb-6 inline-flex items-center gap-1 rounded-lg bg-field p-1">
+          {(["live", "results"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className={`rounded-md px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
+                view === v ? "bg-card text-primary shadow-sm" : "text-secondary hover:text-primary"
+              }`}
+            >
+              {v === "live" ? "Live preview" : "Results"}
+            </button>
+          ))}
+        </div>
+      )}
+      {live && view === "live" ? (
+        <LiveView live={live} />
+      ) : (
+        <Results pack={pack} runId={runId} />
+      )}
+    </>
   );
 }
 

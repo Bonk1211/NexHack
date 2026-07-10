@@ -97,6 +97,7 @@ class PersonaState(PersonaInput, total=False):
     status: str
     blocked_at: Optional[str]
     blocked_url: Optional[str]       # browser address where the persona got stuck
+    closing: str                     # persona's final word — quit reason, or success feedback
 
 
 class PersonaRunRaw(TypedDict):
@@ -112,6 +113,7 @@ class PersonaRunRaw(TypedDict):
     shots: list[Optional[str]]
     status: str
     blocked_at: Optional[str]
+    closing: str
 
 
 class RunState(TypedDict, total=False):

@@ -10,7 +10,7 @@ import {
   type ReplayClip,
   type PersonaResult,
   type StreamEvent,
-  type UsageSummary,
+  type WcagDetail,
 } from "@/lib/live";
 
 const DEFAULT_TARGET = "http://localhost:8000/fixture/index.html";
@@ -39,8 +39,145 @@ const STATUS_DOT: Record<string, string> = {
   na: "bg-tertiary",
 };
 
+// Precise definitions, mirroring the actual scorer logic (backend/app/scoring/
+// engine.py: _step_blocks / _has_friction) — not vague color-naming. Amber
+// specifically is NOT "still passing" — it's "completed, but harder than it
+// should have been," which is easy to misread as a pass at a glance.
+const MATRIX_LEGEND: { status: string; label: string; detail: string }[] = [
+  {
+    status: "green",
+    label: "Clean",
+    detail: "Completed with no friction — dwell time, confusion, and reading level all stayed within range for this persona.",
+  },
+  {
+    status: "amber",
+    label: "Friction",
+    detail: "Completed, but not cleanly — the persona took longer than expected, reported meaningful confusion (≥50%), or the on-screen copy exceeded their reading level. Not blocked, just harder than it should be.",
+  },
+  {
+    status: "red",
+    label: "Blocked",
+    detail: "The persona could not get past this step — a dead end, an exhausted retry limit, or dwell time past the give-up threshold.",
+  },
+  {
+    status: "na",
+    label: "Not reached",
+    detail: "This persona never reached this screen — they were blocked at an earlier step, or their path didn't cross it.",
+  },
+];
+
+// WCAG criterion -> friendly label, mirrors backend/app/evidence/pack.py's
+// _ISSUE_TEXT so the trusted stream reads the same everywhere it surfaces.
+const WCAG_LABEL: Record<string, string> = {
+  "1.4.3": "Contrast",
+  "2.5.8": "Tap target size",
+  "2.4.3": "Focus order",
+  "1.3.1": "Form labels",
+  "4.1.2": "Name/role/value",
+  "1.1.1": "Text alternatives",
+};
+
+// Severity chip colors — mirrors the SEV_CHIP convention already used on the
+// project dashboard (app/projects/[projectId]/page.tsx) so severity reads the
+// same wherever it surfaces.
+const SEV_CHIP: Record<string, string> = {
+  P0: "bg-blocked/12 text-blocked",
+  P1: "bg-[#b25e00]/12 text-[#b25e00]",
+  P2: "bg-[#b25e00]/10 text-[#9a6a00]",
+  P3: "bg-field text-secondary",
+};
+
+// A few blocked_at values are system/infra events, not something a real user
+// experienced on the page (§23) — labeling them "Blocked at llm_error" reads as
+// an accessibility finding when it's actually a dropped API call. Call them out
+// distinctly so they don't get miscounted as a UX failure in a compliance read.
+const INFRA_BLOCK_REASONS: Record<string, string> = {
+  llm_error: "Run interrupted — the model call failed mid-session, not a page finding",
+  offline: "No LLM configured for this run",
+};
+const SOFT_BLOCK_REASONS: Record<string, string> = {
+  no_action: "Agent found no next action on this screen and gave up",
+  max_turns: "Agent ran out of turns before reaching the goal",
+};
+
+// The persona's own first-person line, closest to the moment they got stuck —
+// falls back to the last thing they said if nothing matches the block step.
+function findSay(p: PersonaResult): { text: string; stepLabel?: string } | null {
+  const steps = p.steps || [];
+  if (p.blocked_at) {
+    const at = steps.find((s) => (s.step_label ?? s.step_key) === p.blocked_at);
+    if (at?.say) return { text: at.say, stepLabel: p.blocked_at };
+  }
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].say) return { text: steps[i].say as string, stepLabel: steps[i].step_label ?? steps[i].step_key };
+  }
+  return null;
+}
+
 function pct(n: number) {
   return `${Math.round(n * 100)}%`;
+}
+
+// Real weighted breakdown behind the top-line inclusion score — averaged across
+// personas the same way the top-line score itself is (engine.py's score() computes
+// wcag/behavioral/llm per persona; build_pack averages inclusion_score the same way).
+function ScoreBreakdownCard({ personas }: { personas: PersonaResult[] }) {
+  const [open, setOpen] = useState(false);
+  const withBreakdown = personas.filter((p) => p.score_breakdown);
+  if (withBreakdown.length === 0) return null;
+
+  const avg = (pick: (b: NonNullable<PersonaResult["score_breakdown"]>) => number) =>
+    withBreakdown.reduce((sum, p) => sum + pick(p.score_breakdown!), 0) / withBreakdown.length;
+
+  const wcagScore = avg((b) => b.wcag_score);
+  const behavioralScore = avg((b) => b.behavioral_score);
+  const llmScore = avg((b) => b.llm_score);
+  const weights = withBreakdown[0].score_breakdown!.weights;
+
+  // Color by the score's own value, not by which row it's in — same 75%/45%
+  // thresholds as the project health badge (app/projects/page.tsx healthBadge()),
+  // so "greener is better" reads consistently everywhere in the app. A fixed
+  // per-category color would let a higher score render in a worse-looking color
+  // than a lower one, which fights the convention the rest of the UI teaches.
+  const barColor = (score: number) =>
+    score >= 0.75 ? "bg-ok" : score >= 0.45 ? "bg-friction" : "bg-blocked";
+
+  const rows = [
+    { label: "WCAG conformance", note: "trusted — axe-core", weight: weights.wcag, score: wcagScore },
+    { label: "Behavioral completion", note: "indicative — dwell, retries, dead ends", weight: weights.behavioral, score: behavioralScore },
+    { label: "AI confusion signal", note: "indicative — persona confusion score", weight: weights.llm, score: llmScore },
+  ];
+
+  return (
+    <div className="mt-3 border-t border-hairline pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-[12px] font-medium text-brand hover:underline"
+      >
+        {open ? "Hide" : "How is this score calculated?"}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2.5">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center gap-3">
+              <div className="w-40 shrink-0">
+                <div className="text-[12px] font-medium text-primary">{r.label}</div>
+                <div className="text-[11px] text-tertiary">{r.note} · {pct(r.weight)} weight</div>
+              </div>
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-field">
+                <div className={`h-full rounded-full ${barColor(r.score)}`} style={{ width: pct(r.score) }} />
+              </div>
+              <span className="w-9 shrink-0 text-right text-[12px] font-medium text-primary">{pct(r.score)}</span>
+            </div>
+          ))}
+          <p className="pt-1 text-[11px] leading-relaxed text-tertiary">
+            Inclusion score = ({pct(weights.wcag)} × WCAG) + ({pct(weights.behavioral)} × Behavioral) + ({pct(weights.llm)} × AI confusion) — averaged across {withBreakdown.length} persona{withBreakdown.length > 1 ? "s" : ""}. WCAG is weighted highest because it's the trusted, deterministic stream; the other two are indicative signals.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Live run state, accumulated from the SSE stream ──────────────────────
@@ -124,7 +261,6 @@ export default function AssessmentRunner({
   const [pack, setPack] = useState<Pack | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [showConfigError, setShowConfigError] = useState(!defaultTarget || linkedPersonas.length === 0);
   // After a run completes both views coexist; this toggles which one is shown so
   // the user can move back and forth between the live preview and the results.
@@ -158,18 +294,15 @@ export default function AssessmentRunner({
     setError(null);
     setPack(null);
     setLive({ runNodes: [], log: [], frames: {}, n: 1 });
-    setUsage(null);
     setView("live");
     esRef.current?.close();
     esRef.current = streamRun({ appName, targetUrl: target, personaNames: selected, mode }, (e) => {
       if (e.type === "usage") {
-        setUsage(e.summary);
-        return;
+        return; // internal telemetry only — not shown to the customer
       }
       if (e.type === "final") {
         setPack(e.pack);
         setRunId(e.run_id);
-        if (e.usage) setUsage(e.usage);
         // Keep `live` so the preview stays available; surface the results view.
         setView("results");
         setLoading(false);
@@ -178,7 +311,6 @@ export default function AssessmentRunner({
       }
       if (e.type === "error") {
         setError(e.message);
-        setUsage(null);
         setLoading(false);
         esRef.current?.close();
         return;
@@ -214,60 +346,67 @@ export default function AssessmentRunner({
         </div>
       )}
 
-      {/* ── Config ── */}
-      <section className="rounded-card bg-card p-5 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col gap-1">
-            <span className="section-label">App name</span>
-            <input
-              className="rounded-lg bg-field px-3 py-2 text-[14px] text-primary outline-none focus:ring-2 focus:ring-brand"
-              value={appName}
-              onChange={(e) => setAppName(e.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="section-label">Target URL</span>
-            <input
-              className="rounded-lg bg-field px-3 py-2 text-[14px] text-primary outline-none focus:ring-2 focus:ring-brand"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-            />
-          </label>
-        </div>
-
-        <div className="mt-4">
-          <span className="section-label">Personas ({selected.length} selected)</span>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {personas.map((p) => {
-              const on = selected.includes(p.stem);
-              return (
-                <button
-                  key={p.stem}
-                  type="button"
-                  onClick={() => toggle(p.stem)}
-                  className={`rounded-full px-3 py-1.5 text-[13px] transition ${
-                    on ? "bg-anchor text-on-dark" : "bg-field text-secondary hover:text-primary"
-                  }`}
-                  title={(p.disabilities || []).join(", ") || "no disability tags"}
-                >
-                  {p.name}
-                </button>
-              );
-            })}
+      {/* ── Config — only before a run starts. Once `live` exists, this step is
+          done; showing the persona selector alongside the live/results view is
+          what was confusing, so it's replaced by just the live/results content. ── */}
+      {!live && (
+        <section className="rounded-card bg-card p-5 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="flex flex-col gap-1">
+              <span className="section-label">App name</span>
+              <input
+                className="rounded-lg bg-field px-3 py-2 text-[14px] text-primary outline-none focus:ring-2 focus:ring-brand"
+                value={appName}
+                onChange={(e) => setAppName(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="section-label">Target URL</span>
+              <input
+                className="rounded-lg bg-field px-3 py-2 text-[14px] text-primary outline-none focus:ring-2 focus:ring-brand"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+              />
+            </label>
           </div>
-        </div>
 
-        <button
-          type="button"
-          disabled={!canRun}
-          onClick={run}
-          className="mt-5 rounded-full bg-brand px-5 py-2.5 text-[14px] font-medium text-white disabled:opacity-40"
-        >
-          {loading ? "Running agents — streaming nodes…" : "Run assessment"}
-        </button>
-        {error && <p className="mt-3 text-[13px] text-blocked">{error}</p>}
-        {usage && <UsageTicker usage={usage} live={!!live} />}
-      </section>
+          <div className="mt-4">
+            <span className="section-label">Personas ({selected.length} selected)</span>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {personas.map((p) => {
+                const on = selected.includes(p.stem);
+                return (
+                  <button
+                    key={p.stem}
+                    type="button"
+                    onClick={() => toggle(p.stem)}
+                    className={`rounded-full px-3 py-1.5 text-[13px] transition ${
+                      on ? "bg-anchor text-on-dark" : "bg-field text-secondary hover:text-primary"
+                    }`}
+                    title={(p.disabilities || []).join(", ") || "no disability tags"}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={!canRun}
+            onClick={run}
+            className="mt-5 rounded-full bg-brand px-5 py-2.5 text-[14px] font-medium text-white disabled:opacity-40"
+          >
+            Start scan
+          </button>
+          {error && <p className="mt-3 text-[13px] text-blocked">{error}</p>}
+        </section>
+      )}
+
+      {/* Error stays visible even once the config form is hidden — a stream
+          error still matters mid-run. */}
+      {live && error && <p className="text-[13px] text-blocked">{error}</p>}
 
       {/* Once a run finishes, both views coexist — switch between them freely. */}
       {pack && (
@@ -288,7 +427,7 @@ export default function AssessmentRunner({
       )}
 
       {live && (!pack || view === "live") && <LiveView live={live} />}
-      {pack && view === "results" && <Results pack={pack} runId={runId} usage={usage} />}
+      {pack && view === "results" && <Results pack={pack} runId={runId} />}
     </div>
   );
 }
@@ -311,82 +450,6 @@ function fmtVal(v: unknown): string {
   return String(v);
 }
 
-function formatTokens(n: number): string {
-  return new Intl.NumberFormat("en-US").format(n);
-}
-
-function formatCost(amount: number, currency: string): string {
-  if (amount === 0) return `${currency} 0.0000`;
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 4,
-      maximumFractionDigits: 6,
-    }).format(amount);
-  } catch {
-    return `$${amount.toFixed(4)}`;
-  }
-}
-
-function UsageDetails({ usage, title, dense = false }: { usage: UsageSummary; title: string; dense?: boolean }) {
-  const headingClass = dense ? "text-[13px] text-primary" : "text-[16px] text-primary";
-  const totalClass = dense ? "font-mono text-[12px] text-anchor" : "font-mono text-[13px] text-anchor";
-  const statsClass = dense ? "text-[11px] text-secondary" : "text-[12px] text-secondary";
-  const legendClass = dense ? "text-[11px] text-tertiary" : "text-[12px] text-tertiary";
-  const modelClass = dense ? "text-[11px] text-secondary" : "text-[12px] text-secondary";
-
-  const prompt = formatTokens(usage.total_prompt_tokens);
-  const completion = formatTokens(usage.total_completion_tokens);
-  const tokens = formatTokens(usage.total_tokens);
-  const costLine = usage.pricing_applied
-    ? `Estimated cost ${formatCost(usage.total_cost, usage.currency)}`
-    : "Set LLM_PRICING in the backend to unlock cost estimates.";
-
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <span className={headingClass}>{title}</span>
-        <span className={totalClass}>{tokens} tok</span>
-      </div>
-      <div className={statsClass}>
-        {prompt} prompt · {completion} completion
-      </div>
-      <div className={legendClass}>{costLine}</div>
-      {usage.models.length > 0 && (
-        <ul className="mt-2 space-y-1">
-          {usage.models.map((m) => (
-            <li key={m.model} className="flex items-baseline justify-between">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">{m.model}</span>
-              <span className={`${modelClass} font-mono`}>
-                {formatTokens(m.total_tokens)} tok
-                {usage.pricing_applied && m.pricing_applied
-                  ? ` · ${formatCost(m.cost, usage.currency)}`
-                  : ""}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function UsageTicker({ usage, live }: { usage: UsageSummary; live: boolean }) {
-  return (
-    <div className="mt-4 rounded-xl bg-field/60 p-3 shadow-inner">
-      <UsageDetails usage={usage} title={live ? "Live token usage" : "Token usage"} dense />
-    </div>
-  );
-}
-
-function UsageCard({ usage }: { usage: UsageSummary }) {
-  return (
-    <div className="rounded-card bg-card p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-      <UsageDetails usage={usage} title="Token usage" />
-    </div>
-  );
-}
 
 function NodeOutputCard({ item }: { item: NodeCardItem }) {
   const title = item.scope === "persona" ? `${item.persona} · ${item.node}` : item.node;
@@ -557,6 +620,10 @@ function PersonaColumn({
   const monologue = items
     .filter((it) => it.monologue)
     .map((it) => ({ id: it.id, text: it.monologue as string }));
+  // Live runs stream a video frame; a replayed historical run has none, so fall
+  // back to the latest captured step screenshot for the phone frame.
+  const lastShot = [...items].reverse().find((it) => it.screenshot_url)?.screenshot_url;
+  const lastShotUrl = frame ? null : mediaUrl(lastShot ?? null);
 
   return (
     <div className="rounded-card bg-card p-3">
@@ -584,6 +651,13 @@ function PersonaColumn({
               <img
                 src={`data:image/jpeg;base64,${frame}`}
                 alt={`${displayName} live browser`}
+                className="block w-full"
+              />
+            ) : lastShotUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={lastShotUrl}
+                alt={`${displayName} last captured screen`}
                 className="block w-full"
               />
             ) : (
@@ -633,7 +707,232 @@ function PersonaColumn({
   );
 }
 
-export function Results({ pack, runId, usage }: { pack: Pack; runId: string | null; usage: UsageSummary | null }) {
+// The trusted WCAG stream, made actionable: failing criteria expand to show
+// axe's own rule description, which element(s) it flagged, and why — not just
+// a bare "1.4.3 · fail" that nobody without the spec memorized can decode.
+function WcagCompliance({
+  conformance,
+  details,
+}: {
+  conformance: Record<string, string>;
+  details?: Record<string, WcagDetail>;
+}) {
+  const criteria = Object.keys(conformance);
+  if (criteria.length === 0) {
+    return (
+      <div>
+        <div className="flex items-center gap-2">
+          <h2 className="section-label">WCAG compliance</h2>
+          <span className="rounded-full bg-tint-ok px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">
+            Trusted · axe-core
+          </span>
+        </div>
+        <p className="mt-2 text-[13px] text-tertiary">No WCAG criteria captured for this run.</p>
+      </div>
+    );
+  }
+
+  // Failing criteria first (actionable, get the detail treatment) — passing
+  // ones are just a confirmation, so they stay as compact pills below.
+  const failing = criteria.filter((c) => conformance[c] === "fail");
+  const passing = criteria.filter((c) => conformance[c] !== "fail");
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <h2 className="section-label">WCAG compliance</h2>
+        <span className="rounded-full bg-tint-ok px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">
+          Trusted · axe-core
+        </span>
+      </div>
+
+      {failing.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {failing.map((criterion) => (
+            <WcagFailCard key={criterion} criterion={criterion} detail={details?.[criterion]} />
+          ))}
+        </div>
+      )}
+
+      {passing.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {passing.map((criterion) => {
+            const label = details?.[criterion]?.description || WCAG_LABEL[criterion] || `WCAG ${criterion}`;
+            return (
+              <div key={criterion} className="group/wcag relative">
+                <span className="flex items-center gap-1.5 rounded-full bg-tint-ok px-2.5 py-1 text-[12px] text-ok">
+                  <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                  {criterion} · pass
+                </span>
+                <div className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-64 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/wcag:opacity-100">
+                  <p className="text-[12px] leading-relaxed text-secondary">{label}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WcagFailCard({ criterion, detail }: { criterion: string; detail?: WcagDetail }) {
+  const [open, setOpen] = useState(false);
+  const label = detail?.description || WCAG_LABEL[criterion] || `WCAG ${criterion} failure`;
+  const nodes = detail?.nodes ?? [];
+
+  return (
+    <div className="rounded-card border-l-[3px] border-blocked bg-tint-blocked p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-primary">{label}</div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-blocked">
+            <span>{criterion} · fail</span>
+            {detail?.rule_id && <span className="font-mono text-tertiary">{detail.rule_id}</span>}
+            {detail?.owner && (
+              <span className="rounded-full bg-card px-1.5 py-0.5 text-[10px] font-medium text-secondary">
+                {detail.owner}
+              </span>
+            )}
+          </div>
+        </div>
+        {nodes.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="shrink-0 text-[12px] font-medium text-brand hover:underline"
+          >
+            {open ? "Hide" : `Show ${nodes.length} element${nodes.length > 1 ? "s" : ""}`}
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-2 border-t border-blocked/20 pt-3">
+          {nodes.map((n, i) => (
+            <div key={i} className="rounded-lg bg-card p-2.5">
+              <div className="font-mono text-[11px] text-primary">{n.target}</div>
+              {n.html && (
+                <div className="mt-1 overflow-x-auto rounded bg-field px-2 py-1 font-mono text-[11px] text-secondary">
+                  {n.html}
+                </div>
+              )}
+              {n.failure_summary && (
+                <p className="mt-1 text-[12px] leading-relaxed text-secondary">{n.failure_summary}</p>
+              )}
+            </div>
+          ))}
+          {detail?.help_url && (
+            <a
+              href={detail.help_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block text-[12px] font-medium text-brand hover:underline"
+            >
+              Learn more →
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One persona's verdict — severity as a colored chip (not buried in prose),
+// system/infra blocks called out distinctly from real page findings, WCAG
+// failures as scannable pills, and the persona's own first-person line quoted
+// like real user feedback, not just a machine verdict.
+function PersonaVerdictCard({ p }: { p: PersonaResult }) {
+  const blocked = p.verdict === "blocked";
+  const infraReason = p.blocked_at ? INFRA_BLOCK_REASONS[p.blocked_at] : undefined;
+  const softReason = p.blocked_at ? SOFT_BLOCK_REASONS[p.blocked_at] : undefined;
+  // Prefer the persona's explicit final word (a stated quit reason, or genuine
+  // success feedback) over the ordinary per-step "say" — that's just whatever
+  // they happened to be narrating in the moment, not a verdict on the whole run.
+  // Falls back to it for older runs recorded before `closing` existed.
+  const closingText = p.closing?.trim();
+  const say = findSay(p);
+
+  return (
+    <div
+      className={`rounded-card p-4 ${
+        infraReason
+          ? "bg-field border-l-[3px] border-tertiary"
+          : blocked
+            ? "bg-tint-blocked border-l-[3px] border-blocked"
+            : "bg-card"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="font-display text-[16px] text-primary">{p.persona}</div>
+        {p.severity && (
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${SEV_CHIP[p.severity] ?? SEV_CHIP.P3}`}>
+            {p.severity}
+          </span>
+        )}
+      </div>
+
+      <div className={`mt-1 text-[13px] ${infraReason ? "text-tertiary" : blocked ? "font-medium text-blocked" : "text-secondary"}`}>
+        {infraReason
+          ? infraReason
+          : softReason
+            ? `Blocked — ${softReason}`
+            : blocked
+              ? `Blocked at "${p.blocked_at}"`
+              : "Completed"}
+      </div>
+
+      {p.wcag_failures.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {p.wcag_failures.map((crit) => (
+            <span
+              key={crit}
+              className="flex items-center gap-1 rounded-full bg-tint-blocked px-2 py-0.5 text-[11px] text-blocked"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-blocked" />
+              {crit}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {(closingText || say) && (
+        <div className="mt-3 border-l-2 border-hairline pl-3">
+          <p className="text-[12px] italic leading-relaxed text-secondary">
+            &ldquo;{closingText || say!.text}&rdquo;
+          </p>
+          <p className="mt-1 text-[11px] text-tertiary">
+            — {p.persona}
+            {!closingText && say?.stepLabel ? `, at "${say.stepLabel}"` : ""}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Legend for the friction matrix's status dots — each with a hover tooltip
+// spelling out the precise definition (mirrors the scorer, not just a color
+// name). Amber in particular reads as "still fine" at a glance; it isn't.
+function MatrixLegend() {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-4">
+      {MATRIX_LEGEND.map((item) => (
+        <div key={item.status} className="group/legend relative">
+          <span className={`flex items-center gap-1.5 text-[12px] ${STATUS_COLOR[item.status]}`}>
+            <span className={`h-2 w-2 rounded-full ${STATUS_DOT[item.status]}`} />
+            {item.label}
+          </span>
+          <div className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-64 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/legend:opacity-100">
+            <p className="text-[12px] leading-relaxed text-secondary">{item.detail}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function Results({ pack, runId }: { pack: Pack; runId: string | null }) {
   return (
     <section className="mt-8 space-y-8">
       {/* Score + synthesis */}
@@ -648,35 +947,25 @@ export function Results({ pack, runId, usage }: { pack: Pack; runId: string | nu
         {pack.synthesis?.narrative && (
           <p className="mt-1 text-[13px] text-secondary">{pack.synthesis.narrative}</p>
         )}
+        <ScoreBreakdownCard personas={pack.personas} />
       </div>
 
-      {usage && (
-        <div>
-          <h2 className="section-label mb-2">Token usage</h2>
-          <UsageCard usage={usage} />
-        </div>
-      )}
+      {/* WCAG compliance — TRUSTED stream (axe-core), kept visibly separate from
+          the persona verdicts below (INDICATIVE). This is the other half of the
+          "two parallel checks" pitch — it must not just live in per-persona
+          "WCAG: ..." tags, or it reads as if only one stream exists. */}
+      <WcagCompliance
+        conformance={pack.wcag_conformance}
+        details={pack.wcag_details}
+      />
 
-      {/* Persona verdicts */}
+
+      {/* Persona verdicts — INDICATIVE stream (persona simulation), separate from
+          the trusted WCAG panel above. */}
       <div className="grid gap-3 sm:grid-cols-3">
-        {pack.personas.map((p) => {
-          const blocked = p.verdict === "blocked";
-          return (
-            <div
-              key={p.persona}
-              className={`rounded-card p-4 ${blocked ? "bg-tint-blocked border-l-[3px] border-blocked" : "bg-card"}`}
-            >
-              <div className="font-display text-[16px] text-primary">{p.persona}</div>
-              <div className={`mt-1 text-[13px] ${blocked ? "font-medium text-blocked" : "text-secondary"}`}>
-                {blocked ? `Blocked at ${p.blocked_at}` : "Completed"}
-                {p.severity ? ` · ${p.severity}` : ""}
-              </div>
-              {p.wcag_failures.length > 0 && (
-                <div className="mt-1 text-[12px] text-tertiary">WCAG: {p.wcag_failures.join(", ")}</div>
-              )}
-            </div>
-          );
-        })}
+        {pack.personas.map((p) => (
+          <PersonaVerdictCard key={p.persona} p={p} />
+        ))}
       </div>
 
       {/* Friction matrix (the hero diff) */}
@@ -693,25 +982,83 @@ export function Results({ pack, runId, usage }: { pack: Pack; runId: string | nu
               </tr>
             </thead>
             <tbody>
-              {Object.entries(pack.matrix.rows).map(([persona, cells]) => (
-                <tr key={persona} className="border-t border-hairline">
-                  <td className="p-2 text-primary">{persona}</td>
-                  {pack.matrix.steps.map((s) => {
-                    const c = cells[s];
-                    return (
-                      <td key={s} className="p-2">
-                        <span className={`inline-flex items-center gap-1.5 ${STATUS_COLOR[c?.status ?? "na"]}`}>
-                          <span className={`h-2 w-2 rounded-full ${STATUS_DOT[c?.status ?? "na"]}`} />
-                          {c?.status ?? "na"}
-                        </span>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
+              {Object.entries(pack.matrix.rows).map(([persona, cells]) => {
+                const steps = pack.personas.find((p) => p.persona === persona)?.steps ?? [];
+                return (
+                  <tr key={persona} className="border-t border-hairline">
+                    <td className="p-2 text-primary">{persona}</td>
+                    {pack.matrix.steps.map((s) => {
+                      const c = cells[s];
+                      // Last-write-wins per step_key, matching build_friction_matrix() on the
+                      // backend — a retried step overwrites the earlier attempt's status, so the
+                      // tooltip must show the same attempt the cell's color was computed from.
+                      const matches = steps.filter((st) => st.step_key === s);
+                      const step = matches[matches.length - 1];
+                      return (
+                        <td key={s} className="p-2">
+                          <div className="group/cell relative inline-block">
+                            <span className={`inline-flex items-center gap-1.5 ${STATUS_COLOR[c?.status ?? "na"]}`}>
+                              <span className={`h-2 w-2 rounded-full ${STATUS_DOT[c?.status ?? "na"]}`} />
+                              {c?.status ?? "na"}
+                            </span>
+                            {step && (
+                              <div className="pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-64 rounded-xl border border-hairline bg-card p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover/cell:opacity-100">
+                                {/* Every raw signal that can drive this cell's color (engine.py's
+                                    _step_blocks — dead_end/incomplete/retries — and _has_friction —
+                                    dwell/confusion/reading grade). An amber cell can mean either "real
+                                    friction, never blocked" or "blocked here, recovered later" — those
+                                    are different stories, so both sets of signals are shown, not just
+                                    one guessed set. WCAG is deliberately separate: it's the trusted
+                                    stream (shown above) and never itself determines this color. */}
+                                <div className="space-y-1.5 text-[12px]">
+                                  {step.dead_end && (
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="text-tertiary">Dead end here</span>
+                                      <span className="text-blocked">yes{!step.completed ? "" : " (recovered)"}</span>
+                                    </div>
+                                  )}
+                                  {!!step.retries && (
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="text-tertiary">Retries</span>
+                                      <span className="text-primary">{step.retries}</span>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">Dwell</span>
+                                    <span className="text-primary">{step.dwell_s.toFixed(1)}s</span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">AI confusion</span>
+                                    <span className="text-primary">
+                                      {step.llm_judgment ? pct(step.llm_judgment.confusion) : "—"}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-tertiary">Reading grade</span>
+                                    <span className="text-primary">
+                                      {step.reading_grade != null ? step.reading_grade.toFixed(1) : "—"}
+                                    </span>
+                                  </div>
+                                  {step.axe_violations.length > 0 && (
+                                    <div className="flex items-center justify-between gap-3 border-t border-hairline pt-1.5">
+                                      <span className="text-tertiary">WCAG (trusted, separate)</span>
+                                      <span className="text-blocked">{step.axe_violations.join(", ")}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        <MatrixLegend />
       </div>
 
       {/* Empathy replay — one card per persona: an NLP summary of the friction they
